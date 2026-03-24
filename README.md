@@ -26,13 +26,13 @@ pip install c2sync
 
 ## Usage
 ### Basic commands
-```bash
+```
 c2sync init     Start a C2Sync session
 c2sync commit   Preview changes and confirm or abort them
 c2sync cancel   Cancel the current C2Sync session
 ```
 ### init
-```bash
+```
 Usage:
 c2sync init [options] TTY_DEVICE
 
@@ -44,7 +44,7 @@ Options:
 This command starts a C2Sync session. 
 
 ### commit
-```bash
+```
 Usage:
 c2sync commit [options]
 
@@ -52,7 +52,7 @@ Options:
 ```
 
 ### cancel
-```bash
+```
 Usage:
 c2sync cancel [options]
 
