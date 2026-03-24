@@ -1,0 +1,21 @@
+[project]
+name = "c2sync"
+version = "0.1.0"
+description = "Console Config Sync tool for network devices"
+authors = [
+  { name="0uwl", email="ouwl.person@proton.me" }
+]
+readme = "README.md"
+requires-python = ">=3.9"
+
+dependencies = [
+  "pyserial",
+  "watchdog"
+]
+
+[project.scripts]
+c2sync = "c2sync.main:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
