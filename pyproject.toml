@@ -10,7 +10,8 @@ requires-python = ">=3.9"
 
 dependencies = [
   "pyserial",
-  "watchdog"
+  "watchdog",
+  "pytest"
 ]
 
 [project.scripts]
