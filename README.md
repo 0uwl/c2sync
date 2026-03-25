@@ -36,7 +36,7 @@ interface GigabitEthernet1/0/1
  switchport access vlan 100
  switchport nonegotiate
 ```
-C2Sync diffs the original with the changed lines and sees that `description Sevrer` has changed to `description Sevrer`. However, issuing only that command would not work since we need to be inside the interface context. Therefore, C2sync rebuilds the context and adds it to the staged changes by searching the lines of the configuration file upwards until it reaches a line with less leading white spaces. This line is added to the staged changes which then looks like this:
+C2Sync diffs the original with the changed lines and sees that `description Sevrer` has changed to `no description Sevrer`. However, issuing only that command would not work since we need to be inside the interface context. Therefore, C2sync rebuilds the context and adds it to the staged changes by searching the lines of the configuration file upwards until it reaches a line with less leading white spaces. This line is added to the staged changes which then looks like this:
 ```
 interface GigabitEthernet1/0/1
  no description Sevrer
