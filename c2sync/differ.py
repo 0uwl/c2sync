@@ -1,85 +1,186 @@
+from c2sync import Project
 import logging
 import difflib
+from typing import List
 
-from c2sync import Project
+from c2sync.models import Addition, Command, CommandBlock
 
 LOGGER = logging.getLogger(__name__)
 
+
 class Differ:
+    """
+    Responsible for computing configuration differences and transforming them
+    into executable CLI command blocks.
+    """
+
     def __init__(self, project: Project) -> None:
-        pass
+        self.staging_file = project.STAGING_FILE
 
 
-    def get_indent_level(self, line: str) -> int:
+    def save_to_staging(self, old_lines: List[str], new_lines: List[str]) -> None:
+        """
+        Generate CLI command blocks from config differences and append them
+        to the staging file.
+        """
+        blocks = self._build_command_blocks(old_lines, new_lines)
+
+        with open(self.staging_file, 'a') as file:
+            for block in blocks:
+                # Convert structured block into CLI lines
+                file.write("\n".join(block.to_lines()) + "\n")
+
+
+    def clear_staging(self) -> None:
+        """
+        Clear the staging file.
+        """
+        # Open in write mode truncates the file to zero length
+        open(self.staging_file, 'w').close()
+
+
+    @staticmethod
+    def _get_indent_level(line: str) -> int:
+        """
+        Return the number of leading spaces in a line.
+        """
         return len(line) - len(line.lstrip(' '))
 
 
-    def get_added_lines(self, old_lines: list[str], new_lines: list[str]):
-        diff = difflib.ndiff(old_lines, new_lines)
-        return [line[2:] for line in diff if line.startswith('+ ')]
+    def _build_command_blocks(
+        self,
+        old_lines: List[str],
+        new_lines: List[str]
+    ) -> List[CommandBlock]:
+        """
+        Main pipeline:
+
+        1. Compute diff
+        2. Extract added lines with positions
+        3. Build context-aware command tuples
+        4. Group commands by shared context
+        """
+
+        additions = self._extract_additions(old_lines, new_lines)
+        
+        # Transform raw additions into structured command tuples
+        commands = self._build_commands(additions, new_lines)
+        
+        # Merge commands that share the same context
+        return self._group_commands_by_context(commands)
 
 
-    def build_context_block(self, lines: list[str], index: int):
+    def _extract_additions(
+        self,
+        old_lines: List[str],
+        new_lines: List[str]
+    ) -> List[Addition]:
+        """
+        Return a list of Additions for lines added in new config.
+
+        Uses ndiff but tracks positions safely by walking new_lines.
+        """
+        diff = list(difflib.ndiff(old_lines, new_lines))
+
+        additions: List[Addition] = []
+        new_index = -1  # tracks position in new_lines
+
+        for line in diff:
+            tag = line[:2]      # e.g. "+ ", "- ", "  "
+            content = line[2:]  # actual config line
+
+            # IMPORTANT:
+            # We only advance new_index when the line exists in new_lines.
+            #
+            # ndiff output includes:
+            #   "  " -> exists in both old and new
+            #   "+ " -> exists only in new
+            #   "- " -> exists only in old
+            #
+            # So:
+            #   - "  " and "+ " advance position in new_lines
+            #   - "- " does NOT (it doesn't exist in new_lines)
+            if tag in ("  ", "+ "):
+                new_index += 1
+
+            # We only care about added lines that are not empty/whitespace
+            if tag == "+ " and content.strip():
+                # Store BOTH index and content to avoid fragile lookups later
+                additions.append(Addition(index=new_index, line=content))
+
+        return additions
+
+
+    def _build_commands(
+        self,
+        additions: List[Addition],
+        new_lines: List[str]
+    ) -> List[Command]:
+        """
+        Convert added lines into context-aware Commands.
+        """
+
+        commands = []
+
+        for addition in additions:
+            stripped = addition.line.strip()
+
+            # Rebuild CLI context using indentation hierarchy
+            context = self._build_context_block(
+                new_lines,
+                addition.index
+            )
+
+            commands.append(Command(
+                context=context,
+                action=stripped
+            ))
+
+        return commands
+
+
+    def _build_context_block(self, full_context: list[str], start_index: int) -> list[str]:
+        """
+        Reconstruct the CLI context for a given line by walking upwards
+        in the configuration and collecting parent lines.
+
+        The logic is based on indentation hierarchy.
+        """
         context_block = []
-        current_indent = self.get_indent_level(lines[index])
+        current_indent = self._get_indent_level(full_context[start_index])
 
-        for i in range(index - 1, -1, -1):
-            line = lines[i]
-            line_indent = self.get_indent_level(line)
+        for i in range(start_index - 1, -1, -1):
+            line = full_context[i]
+            line_indent = self._get_indent_level(line)
 
-            # If the current line has fewer indents than the current indent level...
             if line_indent < current_indent:
-                # Add the line to the context_block
                 context_block.insert(0, line.strip())
-                # Set the current indent level to this line's indent level
                 current_indent = line_indent
 
-            # If the current line has no indents, this line is at the root context...
             if current_indent == 0:
-                # Stop building context block
                 break
 
         return context_block
-    
 
-    def get_changes(self, old_lines: list[str], new_lines: list[str]) -> list[str]:
-        """
-            Get a list of commands to be sent to the device.
-        """
-        added = self.get_added_lines(old_lines, new_lines)
-        commands = []
 
-        for line in added:
-            if not line.strip():
-                continue
+    def _group_commands_by_context(
+        self,
+        commands: List[Command]
+    ) -> List[CommandBlock]:
 
-            try:
-                index = new_lines.index(line)
-            except ValueError:
-                continue
+        context_to_commands = {}
+        for command in commands:
+            # Lists are not hashable -> convert to tuple for dict key
+            key = tuple(command.context)
 
-            context_block = self.build_context_block(new_lines, index)
+            # If key doesn't exist, create an empty list and append the commands action to it
+            context_to_commands.setdefault(key, []).append(command.action)
 
-            if context_block:
-                commands.append(tuple(context_block + [line.strip()]))
-            else:
-                commands.append(tuple(line.strip(),))
+        grouped_blocks: List[CommandBlock] = []
+        for context_tuple, actions in context_to_commands.items():
+            grouped_blocks.append(CommandBlock(
+                context=list(context_tuple),
+                actions=actions
+            ))
 
-        # Group commands by context
-        return group_commands(commands)
-        
-
-def group_commands(commands: list[tuple]) -> list[str]:
-    grouped = {}
-    for command in commands:
-        key = tuple(command[:-1])
-        grouped.setdefault(key, []).append(command[-1])
-
-    blocks = []
-    for context, subcommands in grouped.items():
-        if context:
-            blocks.append(list(context) + subcommands)
-        else:
-            blocks.append(subcommands)
-
-    return blocks
+        return grouped_blocks
