@@ -8,62 +8,66 @@ LOGGER = logging.getLogger(__name__)
 
 APP_CONFIG_NAME = 'c2sync.config'
 DEVICE_CONFIG_NAME = 'device.config'
-BAUDRATE = 9600
-TIMEOUT = 600
-PROJECT_DIR = './.c2sync'
-PROMPT_REGEX = r'[>#]\s?$'
-
+STAGING_FILE_NAME = 'staging.txt'
+PROJECT_ROOT = './.c2sync'
 
 @dataclass
 class Project:
     SERIAL_DEVICE: str
-    BAUDRATE: int
-    TIMEOUT: int
-    PROJECT_DIR: str
-    CONFIG_FILE: str
-    PROMPT_REGEX: str
+    BAUDRATE: int = 9600
+    TIMEOUT: int = 600
+    PROJECT_DIR: str = PROJECT_ROOT
+    CONFIG_FILE: str = os.path.join(PROJECT_DIR, APP_CONFIG_NAME)
+    EDIT_FILE: str = os.path.join(PROJECT_DIR, DEVICE_CONFIG_NAME)
+    PROMPT_REGEX: str = r'[>#]\s?$'
+    STAGING_FILE: str = os.path.join(PROJECT_DIR, STAGING_FILE_NAME)
+
+    def to_dict(self):
+        return {
+        'SERIAL_DEVICE': self.SERIAL_DEVICE,
+        'BAUDRATE': self.BAUDRATE,
+        'TIMEOUT': self.TIMEOUT,
+        'PROJECT_DIR': self.PROJECT_DIR,
+        'EDIT_FILE': self.EDIT_FILE,
+        'PROMPT_REGEX': self.PROMPT_REGEX,
+        'STAGING_FILE': self.STAGING_FILE
+    }
 
 
-def get_project() -> Project:
+def init_project(project_config: Project):  
+    LOGGER.info(f'Creating project in {project_config.PROJECT_DIR}')
+    os.makedirs(project_config.PROJECT_DIR)
+
+    # Create a dict of the project config
+    config_dict: dict = project_config.to_dict()
+
+    with open(project_config.CONFIG_FILE, 'w') as config_file:
+        json.dump(config_dict, config_file)
+
+    open(project_config.EDIT_FILE, 'w').close()
+    open(project_config.STAGING_FILE, 'w').close()
+
+    LOGGER.info(f'Created project')
+    print('C2Sync project initialized')
+
+
+def get_project() -> Project | None:
     """
-        Get or create a C2Sync project object containing project information
+        Get the C2Sync project object or return None if no project exists in the current working directory
     """
-    project_dir = os.getcwd() + '/.c2sync'
-    if not os.path.exists(project_dir):
-        LOGGER.info(f'Project directory not found in current working directory, creating {project_dir}')
-        os.makedirs(project_dir)
-        config_dict = _create_configuration(project_dir)
-    else:
-        config_dict = _load_configuration(project_dir)
+    if not os.path.exists(PROJECT_ROOT):
+        LOGGER.error(f'No project found in current working directory')
+        return None
+
+    config_dict = _load_configuration()
             
     c2sync = Project(**config_dict)
 
     return c2sync
 
 
-def _create_configuration(project_dir: str) -> dict:
-    app_config_path = os.path.join(project_dir, APP_CONFIG_NAME)
-    device_config_path = os.path.join(project_dir, DEVICE_CONFIG_NAME)
-
-    config_dict: dict = {
-        'SERIAL_DEVICE': _get_serial_device(),
-        'BAUDRATE': BAUDRATE,
-        'TIMEOUT': TIMEOUT,
-        'PROJECT_DIR': project_dir,
-        'CONFIG_FILE': device_config_path,
-        'PROMPT_REGEX': PROMPT_REGEX
-    }
-
-    with open(app_config_path, 'w') as config_file:
-        json.dump(config_dict, config_file)
-
-    LOGGER.info(f'Created configuration: {config_dict}')
-
-    return config_dict
-
-
-def _load_configuration(project_dir: str) -> dict:
-    config_file_path = os.path.join(project_dir, APP_CONFIG_NAME)
+def _load_configuration() -> dict:
+    config_file_path = os.path.join(PROJECT_ROOT, APP_CONFIG_NAME)
     with open(config_file_path, 'r') as config_file:
         config_dict: dict = json.load(config_file)
     
@@ -72,6 +76,6 @@ def _load_configuration(project_dir: str) -> dict:
     return config_dict
 
 
-def _get_serial_device() -> str:
+def get_serial_device():
     # TODO: Get arguments
-    return "/dev/ttyUSB0"
+    return '/dev/ttyUSB0'
