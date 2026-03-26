@@ -9,7 +9,19 @@ C2Sync projects work similarly to how Git repositories work. When the user runs 
 #### The registry
 Every project has a registry file which stores and tracks information about the project and the pulled devices. This is stored in a JSON-file inside the project folder
 
+#### Project directory structure
+```
+<cwd>/
+├── .c2sync/
+|   ├── register.json
+|   └── <device staging files>
+|
+├── .git/
+|   └── <normal git repository stuff>
+|
+└── <device configuration files>
 
+```
 ### Diff -> CLI Conversion Logic
 
 * Parse Git diff output
@@ -126,6 +138,7 @@ c2sync/
 │   ├── main.py
 │   ├── models.py
 │   ├── serial_interface.py
+│   ├── state_engine.py
 │   └── watcher.py
 │
 ├── pyproject.toml
