@@ -11,11 +11,8 @@ The tool allows a single user on a single machine to:
 * Use Git for diffing, staging, and committing
 * Push only the changes back to the device over a serial console connection
 
-The tool does NOT attempt to replace Git functionality. Instead, it leverages Git as the source of truth and diff engine.
-
 ## Core Design Principles
 
-* Git is the **single source of truth**
 * The tool is **stateless** (no custom staging system)
 * Only **one user per repo/machine**. C2Sync is installed locally per machine per user. 
 * No collaboration features (no PRs, no remotes required)
@@ -24,47 +21,48 @@ The tool does NOT attempt to replace Git functionality. Instead, it leverages Gi
 
 ## Key Features
 
-C2Sync uses a single git repository to store device configuration into separate subdirectories, called "projects".
+C2Sync creates "projects" which store all the necessarry files and information about the devices used in the project. 
 The project directory contains: 
 * The most recently fetched device configuration
 * Tool configurations for this specific project, such as the TTY device used to communicate with the device
 * The staged changes built by C2Sync's context rebuilder
+
+One project can be used for many devices. 
 
 ### 1. Init
 
 Command:
 
 ```
-c2sync init [options] <device> TTY_DEVICE
+c2sync init
 ```
 
 Behavior:
-* Create a new subdirectory in the Git repository
-* 
+* Create a new empty project in the current working directory (./.c2sync/)
 
 ### 2. Pull (device -> Git repo)
 
 Command:
 
 ```
-c2sync pull <device>
+c2sync pull [TTY_DEVICE] DEVICE
 ```
-
 Behavior:
-* Connect to device via serial
+* Connect to device via serial. 
+* TTY_DEVICE must be specified the first time a device is pulled from
 * Handle AAA login (username/password)
 * Disable paging (`terminal length 0`)
-* Run:
+* Runs:
   ```
   show running-config brief
   ```
 * Save output to:
   ```
-  ~/.local/share/c2sync/<device>/running-config.txt
+  ./.c2sync/<DEVICE>.config
   ```
-* Auto-commit:
+* Auto-commit to project repository:
   ```
-  git commit -m "pulled from <device>"
+  git commit -m "pulled from <DEVICE>"
   ```
 
 ### 3. Local Editing
@@ -100,9 +98,8 @@ This makes sure context is preserved and removes the need to send the entire con
 Command:
 
 ```
-c2sync push <device> TTY_DEVICE
+c2sync push DEVICE
 ```
-
 Behavior:
 
 * Use GitPython to compute diff between:
@@ -110,7 +107,7 @@ Behavior:
   * Working tree or staged changes
 * Extract **added lines only**
 * Ignore deletions entirely
-  * Users must explicitly add `no ...` commands
+  * Users must explicitly add `no ...` commands to delete configuration lines
 
 ## Diff -> CLI Conversion Logic
 
