@@ -1,126 +1,23 @@
-# C2Sync – Git-Backed Console Config Sync Tool
+# C2Sync – Console Configuration Synchronizer
 
-## Overview
+## Functions
 
-C2Sync is a Python-based CLI tool that acts as a **middleman between a network device (over console/serial) and a local Git repository**.
+### The project directory
 
-The tool allows a single user on a single machine to:
+C2Sync projects work similarly to how Git repositories work. When the user runs `c2sync init`, a hidden folder (`./.c2sync/`) is created inside the current working directory as well as a Git repository.
 
-* Pull a device’s running configuration into a local Git repo
-* Edit the configuration locally using any editor (e.g. VS Code)
-* Use Git for diffing, staging, and committing
-* Push only the changes back to the device over a serial console connection
+#### The registry
+Every project has a registry file which stores and tracks information about the project and the pulled devices. This is stored in a JSON-file inside the project folder
 
-## Core Design Principles
 
-* The tool is **stateless** (no custom staging system)
-* Only **one user per repo/machine**. C2Sync is installed locally per machine per user. 
-* No collaboration features (no PRs, no remotes required)
-* Focus on **simplicity, reliability, and CLI correctness**
-* Users are **experienced network engineers**
-
-## Key Features
-
-C2Sync creates "projects" which store all the necessarry files and information about the devices used in the project. 
-The project directory contains: 
-* The most recently fetched device configuration
-* Tool configurations for this specific project, such as the TTY device used to communicate with the device
-* The staged changes built by C2Sync's context rebuilder
-
-One project can be used for many devices. 
-
-### 1. Init
-
-Command:
-
-```
-c2sync init
-```
-
-Behavior:
-* Create a new empty project in the current working directory (./.c2sync/)
-
-### 2. Pull (device -> Git repo)
-
-Command:
-
-```
-c2sync pull [TTY_DEVICE] DEVICE
-```
-Behavior:
-* Connect to device via serial. 
-* TTY_DEVICE must be specified the first time a device is pulled from
-* Handle AAA login (username/password)
-* Disable paging (`terminal length 0`)
-* Runs:
-  ```
-  show running-config brief
-  ```
-* Save output to:
-  ```
-  ./.c2sync/<DEVICE>.config
-  ```
-* Auto-commit to project repository:
-  ```
-  git commit -m "pulled from <DEVICE>"
-  ```
-
-### 3. Local Editing
-
-The user can edit the pulled config file with the text editor of their choise. 
-When the user writes their changes to the file, C2Sync rebuilds the configuration context to properly store configuration changes in a staging file.
-
-Example:
-```
-interface GigabitEthernet1/0/1
- description Sevrer
- switchport mode access
- switchport access vlan 100
- switchport nonegotiate
-```
-To remove the descrption With C2Sync, you edit this interface by editing the configuration file like this:
-```
-interface GigabitEthernet1/0/1
- no description Sevrer
- switchport mode access
- switchport access vlan 100
- switchport nonegotiate
-```
-C2Sync diffs the original with the changed lines and sees that `description Sevrer` has changed to `no description Sevrer`. Issuing only that command would not work since we need to be inside the interface context to adhere to Cisco IOS syntax. Therefore, C2sync rebuilds the context and adds it to the staged changes by searching the lines of the configuration file upwards until it reaches a line with less leading white spaces. This line is added to the staged changes which then looks like this:
-```
-interface GigabitEthernet1/0/1
- no description Sevrer
-```
-This makes sure context is preserved and removes the need to send the entire configuration back to the device every time changes are commited. 
-
-### 4. Push (Git repo -> device)
-
-Command:
-
-```
-c2sync push DEVICE
-```
-Behavior:
-
-* Use GitPython to compute diff between:
-  * Last committed version (HEAD)
-  * Working tree or staged changes
-* Extract **added lines only**
-* Ignore deletions entirely
-  * Users must explicitly add `no ...` commands to delete configuration lines
-
-## Diff -> CLI Conversion Logic
-
-This is the core feature of the tool.
-
-### Requirements:
+### Diff -> CLI Conversion Logic
 
 * Parse Git diff output
 * Identify added lines (`+`)
 * Ignore removed lines (`-`)
 * Reconstruct CLI context using indentation
 
-### Example:
+#### Example:
 
 Original config:
 ```
@@ -129,20 +26,17 @@ interface GigabitEthernet1/0/1
  switchport mode access
  switchport access vlan 100
 ```
-
 Input diff:
 ```
 + no description Server
 + switchport nonegotiate
 ```
-
 Generated commands sent to the device when pushed:
 ```
 interface GigabitEthernet1/0/1
  no description Server
  switchport nonegotiate
 ```
-
 Resulting config:
 ```
 interface GigabitEthernet1/0/1
@@ -151,7 +45,7 @@ interface GigabitEthernet1/0/1
  switchport nonegotiate
 ```
 
-### Context Reconstruction Algorithm
+#### Context Reconstruction Algorithm
 
 * Determine indentation level of changed line
 * Walk upward in file:
@@ -159,12 +53,11 @@ interface GigabitEthernet1/0/1
   * Repeat until top-level (indent = 0)
 * Build command stack
 
-### Command Grouping
+#### Command Grouping
 
 Group commands by shared context:
 
 Instead of:
-
 ```
 interface Gi1/0/1
  description A
@@ -172,21 +65,18 @@ interface Gi1/0/1
 interface Gi1/0/1
  no shutdown
 ```
-
 Send:
-
 ```
 interface Gi1/0/1
  description A
  no shutdown
 ```
 
-## Serial Communication
+### Serial Communication
 
 Use pySerial.
 
 Required features:
-
 * Open serial port
 * Prompt detection using regex (`[>#]\s?$`)
 * AAA login handling:
@@ -201,6 +91,17 @@ Required features:
   ```
 * Send commands line-by-line
 * Exit config mode (`end`)
+
+### Watcher
+
+The file watcher looks for changes in the fetched configuration files, runs the context rebuilder and adds the result into a staging file. 
+
+### State tracker
+
+C2sync should be able to track which state the pulled devices are in. The states that a device can be in are:
+* **Synced**: This state is reached when all configuration files are matched. Including the file on the host, the running config and also the startup config on the device. The device is in rest
+* **Host pending changes**: This state is reached after the user edits the fetched config file and the staging file is not empty. Now the host config no longer matches the running config, but the running config still matches with the startup config on the device.
+* **Device pending changes**: This state is reached after the user pushes their staged changes to the device, but the changes are not applied to the startup config of the device. Now the host config matches with the running config, but the running config does not match with the startup config
 
 ## Constraints / Simplifications
 
@@ -232,39 +133,6 @@ c2sync/
 └── requirements.txt
 ```
 
-## Required Libraries
-
-* pyserial
-* gitpython
-* pytest
-
-## CLI Commands
-```
-c2sync COMMAND
-
-Commands:
-  init      Create a subdirectory in the repository for this device
-  pull      Pull running config from a device
-  push      Push staged changes to the running config of a device
-  commit    Commit changes from running config to startup config on a device
-  status    Show the current status of a C2Sync session
-  diff      Show the current staged changes for a device
-```
-
-## Example Workflow
-
-```
-c2sync init switch1
-c2sync pull switch1
-
-# edit config in VS Code
-
-git diff
-git commit -am "update interface config"
-
-c2sync push switch1
-```
-
 ## Goal
 
 Build a simple, reliable tool that:
@@ -272,3 +140,20 @@ Build a simple, reliable tool that:
 * Uses Git instead of reinventing version control
 * Safely translates file edits into CLI commands
 * Works entirely over console (no network dependency)
+
+## Example Workflow
+```
+c2sync init
+c2sync pull switch1 /dev/ttyUSB0
+
+# edit config in VS Code
+
+c2sync diff switch1
+c2sync sync switch1
+c2sync apply switch1
+```
+
+## Required Libraries
+* pyserial
+* gitpython
+* pytest
