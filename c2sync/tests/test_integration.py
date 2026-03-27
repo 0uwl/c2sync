@@ -1,4 +1,4 @@
-from c2sync.differ import Differ
+from c2sync.diff_engine import Differ
 
 from constants import PROJECT
 

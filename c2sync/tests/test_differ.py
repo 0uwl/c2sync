@@ -3,7 +3,7 @@ import shutil
 from pathlib import Path
 
 from c2sync import init_project
-from c2sync.differ import Differ
+from c2sync.diff_engine import Differ
 from c2sync.models import Addition, Command, CommandBlock
 
 from constants import PROJECT

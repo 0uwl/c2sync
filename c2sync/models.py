@@ -1,35 +1,48 @@
-from dataclasses import dataclass
-from typing import List
+import json
+from pathlib import Path
+
+C2SYNC_DIR = Path(".c2sync")
+REGISTRY = C2SYNC_DIR / "register.json"
+
+def init_project():
+    C2SYNC_DIR.mkdir(exist_ok=True)
+    if not REGISTRY.exists():
+        REGISTRY.write_text(json.dumps({}))
 
 
-@dataclass(frozen=True)
-class Addition:
-    """
-    Represents a line added in the new configuration.
-    """
-    index: int   # Position in new_lines
-    line: str    # Raw line content
+def load_registry():
+    return json.loads(REGISTRY.read_text())
 
 
-@dataclass(frozen=True)
-class Command:
-    """
-    Represents a CLI command with its context.
-    """
-    context: List[str]  # Parent CLI context (e.g., ["interface Gi1/0/1"])
-    action: str         # Actual command (e.g., "description test")
+def save_registry(data):
+    REGISTRY.write_text(json.dumps(data, indent=2))
 
 
-@dataclass
-class CommandBlock:
-    """
-    Represents a group of commands sharing the same context.
-    """
-    context: List[str]
-    actions: List[str]
+def get_device(name, tty=None):
+    data = load_registry()
 
-    def to_lines(self) -> List[str]:
-        """
-        Convert block into CLI-ready list of lines.
-        """
-        return self.context + self.actions if self.context else self.actions
+    if name not in data:
+        if not tty:
+            raise Exception("TTY required for first pull")
+        data[name] = {"tty": tty}
+        save_registry(data)
+
+    return Device(name, data[name]["tty"])
+
+
+class Device:
+    def __init__(self, name, tty):
+        self.name = name
+        self.tty = tty
+        self.config_path = Path(f".c2sync/{name}.config")
+        self.staging_path = Path(f".c2sync/.{name}.staging")
+
+
+    def save_config(self, config):
+        self.config_path.write_text(config)
+
+
+def read_staging(device):
+    if not device.staging_path.exists():
+        return []
+    return device.staging_path.read_text().splitlines()

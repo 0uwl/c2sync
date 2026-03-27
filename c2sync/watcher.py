@@ -1,30 +1,30 @@
-import logging
-
-from watchdog.observers import Observer
-from watchdog.events import DirModifiedEvent, FileModifiedEvent, FileSystemEventHandler
-
-from c2sync import Project
-from c2sync.differ import Differ
-
-LOGGER = logging.getLogger(__name__)
-
-class ConfigWatcher(FileSystemEventHandler):
-    def __init__(self, project: Project) -> None:
-        self.filepath = project.EDIT_FILE
-        self.differ = Differ(project)
-        self.last_content = self.read_file()
+import time
+from pathlib import Path
+from c2sync import diff_engine, git_ops, models
 
 
-    def read_file(self) -> list[str]:
-        with open(self.filepath, 'r') as file:
-            return file.readlines()
-            
-    
-    def on_modified(self, event: DirModifiedEvent | FileModifiedEvent) -> None:
-        if event.src_path != self.filepath:
-            return
+def watch(device):
+    dev = models.get_device(device)
 
-        old_content = self.last_content
-        new_content = self.read_file()
+    last_mtime = 0
 
-        self.differ.save_to_staging(old_content, new_content)
+    while True:
+        mtime = dev.config_path.stat().st_mtime
+
+        if mtime != last_mtime:
+            handle_change(dev)
+            last_mtime = mtime
+
+        time.sleep(1)
+
+
+def handle_change(device):
+    diff = git_ops.get_diff(device.config_path)
+
+    changed = diff_engine.parse_diff(diff.splitlines())
+
+    file_lines = device.config_path.read_text().splitlines()
+
+    commands = diff_engine.reconstruct(file_lines, changed)
+
+    device.staging_path.write_text("\n".join(commands))
