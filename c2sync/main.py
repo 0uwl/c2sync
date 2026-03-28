@@ -1,13 +1,10 @@
-from c2sync import git_ops, serial_interface, diff_engine
-from c2sync import state_engine, watcher, models
-
 import click
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich.syntax import Syntax
 
-from c2sync import git_ops, serial_interface, models, state_engine
+from c2sync import git_ops, project_manager, serial_interface, state_engine
 
 console = Console()
 
@@ -20,7 +17,7 @@ def cli():
 @cli.command()
 def init():
     """Initialize a C2Sync project"""
-    models.init_project()
+    project_manager.init_project()
     git_ops.init_repo(".")
 
     console.print("[green]✔ Project initialized[/green]")
@@ -32,7 +29,7 @@ def init():
 def pull(device, tty):
     """Pull running config from device"""
 
-    dev = models.get_device(device, tty)
+    dev = project_manager.get_device(device, tty)
 
     console.print(f"[cyan]Connecting to {device}...[/cyan]")
 
@@ -78,8 +75,8 @@ def status(device):
 def diff(device):
     """Show staged CLI commands"""
 
-    dev = models.get_device(device)
-    commands = models.read_staging(dev)
+    dev = project_manager.get_device(device)
+    commands = project_manager.read_staging(dev)
 
     if not commands:
         console.print("[green]No staged changes[/green]")
@@ -102,8 +99,8 @@ def diff(device):
 def sync(device, yes, message):
     """Push staged changes to device"""
 
-    dev = models.get_device(device)
-    commands = models.read_staging(dev)
+    dev = project_manager.get_device(device)
+    commands = project_manager.read_staging(dev)
 
     if not commands:
         console.print("[yellow]No changes to sync[/yellow]")
@@ -142,7 +139,7 @@ def apply(device, yes):
         if not click.confirm("Write memory to device?"):
             return
 
-    dev = models.get_device(device)
+    dev = project_manager.get_device(device)
 
     conn = serial_interface.SerialConnection(dev.tty)
     conn.login()

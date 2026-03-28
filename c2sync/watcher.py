@@ -1,10 +1,10 @@
 import time
 from pathlib import Path
-from c2sync import diff_engine, git_ops, models
+from c2sync import diff_engine, git_ops, project_manager
 
 
 def watch(device):
-    dev = models.get_device(device)
+    dev = project_manager.get_device(device)
 
     last_mtime = 0
 
