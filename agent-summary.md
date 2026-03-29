@@ -115,11 +115,13 @@ C2sync should be able to track which state the pulled devices are in. The states
 * **Host pending changes**: This state is reached after the user edits the fetched config file and the staging file is not empty. Now the host config no longer matches the running config, but the running config still matches with the startup config on the device.
 * **Device pending changes**: This state is reached after the user pushes their staged changes to the device, but the changes are not applied to the startup config of the device. Now the host config matches with the running config, but the running config does not match with the startup config
 
+States are tracked in the device class
+
 ## Constraints / Simplifications
 
 * No support for multi-line configs (e.g. banners)
 * No automatic handling of deletions
-* Assumes Cisco-style indentation
+* Assumes Cisco IOS CLI-style indentation
 * No rollback support
 * No concurrency concerns
 
@@ -138,7 +140,6 @@ c2sync/
 │   ├── main.py
 │   ├── models.py
 │   ├── serial_interface.py
-│   ├── state_engine.py
 │   └── watcher.py
 │
 ├── pyproject.toml

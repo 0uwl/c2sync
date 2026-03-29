@@ -1,15 +1,6 @@
-import logging
-from typing import List
+from c2sync.logger import get_logger
 
-LOGGER = logging.getLogger(__name__)
-
-def parse_diff(diff_lines):
-    return [
-        line[1:]
-        for line in diff_lines
-        if line.startswith("+") and not line.startswith("+++")
-    ]
-
+LOGGER = get_logger()
 
 def get_indentation(line):
     return len(line) - len(line.lstrip())

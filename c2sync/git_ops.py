@@ -1,7 +1,6 @@
 from pathlib import Path
 from git import Repo, InvalidGitRepositoryError, NoSuchPathError, GitCommandError
 
-
 # ---------------------------
 # Repo Management
 # ---------------------------
@@ -74,15 +73,19 @@ def commit_file(file_path: str, message: str) -> None:
 # Diff Operations
 # ---------------------------
 
-def get_diff(file_path: Path) -> str:
+def get_diff(file_path: Path) -> list[str]:
     """
     Get git diff for a specific file (working tree vs index).
     """
     repo = get_repo()
 
     try:
-        diff = repo.git.diff(str(file_path))
-        return diff
+        diff: str = repo.git.diff(str(file_path))
+        return [
+            line[1:]
+            for line in diff.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        ]
     except GitCommandError as e:
         raise Exception(f"Failed to get diff: {e}")
 
@@ -124,7 +127,7 @@ def file_has_changes(file_path: Path) -> bool:
     Check if a specific file has changes.
     """
     diff = get_diff(file_path)
-    return bool(diff.strip())
+    return bool(diff)
 
 
 # ---------------------------

@@ -1,37 +1,21 @@
 import json
 from pathlib import Path
 
-C2SYNC_DIR = Path(".c2sync")
+from c2sync.models import Device
+
+C2SYNC_DIR = Path(".c2sync/")
 REGISTRY = C2SYNC_DIR / "register.json"
-
-
-class Device:
-    """
-    A class representing devices included in the project. Contains a name and the TTY device used to communicate with the device,
-    as well as the path to the pulled config file and its staging file 
-    """
-    def __init__(self, name: str, tty: str):
-        self.name = name
-        self.tty = tty
-        self.config_path = Path(f".c2sync/{name}.config")
-        self.staging_path = Path(f".c2sync/.{name}.staging")
-
-    def save_config(self, config):
-        self.config_path.write_text(config)
-
-    def to_dict(self) -> dict[str, str]:
-        return {
-            "name": self.name,
-            "tty": self.tty,
-            "config_path": str(self.config_path),
-            "staging_path": str(self.staging_path)
-        }
 
 
 def init_project():
     C2SYNC_DIR.mkdir(exist_ok=True)
+    if not C2SYNC_DIR.exists():
+        raise Exception("Failed to create project")
     if not REGISTRY.exists():
         REGISTRY.write_text(json.dumps({}))
+        return True
+    else:
+        return False
 
 
 def load_registry() -> dict[str, Device]:
@@ -88,6 +72,12 @@ def get_device(name, tty: str='') -> Device:
     return device_registry[name]
 
 
+def get_all_devices() -> list[Device]:
+    device_registry = load_registry()
+
+    return [device for device in device_registry.values()]
+
+
 def _create_device(name: str, tty: str) -> Device:
     """Create a new device to be added to the registry
 
@@ -115,7 +105,7 @@ def _create_device(name: str, tty: str) -> Device:
     return new_device
 
 
-def read_staging(device: Device):
+def read_staging(device: Device) -> list[str]:
     if not device.staging_path.exists():
         return []
     return device.staging_path.read_text().splitlines()

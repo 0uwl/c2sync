@@ -1,85 +1,115 @@
+import os
+
 import click
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich.syntax import Syntax
 
-from c2sync import git_ops, project_manager, serial_interface, state_engine
+from c2sync import git_ops, project_manager, serial_interface
+from c2sync.logger import get_logger, setup_logging, set_log_context
+from c2sync.models import Device
 
-console = Console()
+CONSOLE = Console()
 
 @click.group()
 def cli():
     """C2Sync - Console Configuration Synchronizer"""
-    pass
+    setup_logging()
 
 
 @cli.command()
 def init():
     """Initialize a C2Sync project"""
-    project_manager.init_project()
+    result = project_manager.init_project()
+    if not result:
+        CONSOLE.print("\n[yellow]Project already initialized here[/yellow]\n")
+        return
     git_ops.init_repo(".")
 
-    console.print("[green]✔ Project initialized[/green]")
+    log = set_log_context()
+
+    log.info(f"New project initialized in {os.getcwd()}")
+    CONSOLE.print("\n[green] New project initialized[/green]\n")
 
 
 @cli.command()
 @click.argument("device")
 @click.argument("tty", required=False)
-def pull(device, tty):
+def pull(device_name: str, tty: str):
     """Pull running config from device"""
 
-    dev = project_manager.get_device(device, tty)
+    log = set_log_context(device_name)
+    device = project_manager.get_device(device_name, tty)
 
-    console.print(f"[cyan]Connecting to {device}...[/cyan]")
+    log.info(f"Connecting to {device_name} over {tty}")
+    CONSOLE.print(f"\n[cyan]Connecting to {device_name}...[/cyan]\n")
 
-    conn = serial_interface.SerialConnection(dev.tty)
-    conn.login()
+    fetch_config(device)
 
-    config = conn.get_running_config()
+    log.debug("Committing to ")
+    git_ops.commit_all(f"pulled from {device_name}")
 
-    dev.save_config(config)
-
-    git_ops.commit_all(f"pulled from {device}")
-
-    console.print(f"[green]✔ Pulled config from {device}[/green]")
+    CONSOLE.print(f"\n[green]Pulled config from {device_name}[/green]\n")
 
 
 @cli.command()
 @click.argument("device", required=False)
-def status(device):
+def status(device_name: str = ''):
     """Show device status"""
 
-    states = state_engine.get_status(device)
-
+    # Define output table
     table = Table(title="C2Sync Status")
-
     table.add_column("Device", style="cyan")
     table.add_column("State", style="magenta")
+    state_color_mapping = {
+        "SYNCED": "green",
+        "HOST_PENDING": "yellow",
+        "DEVICE_PENDING": "red",
+    }
 
-    for dev, state in states.items():
-        color = {
-            "SYNCED": "green",
-            "HOST_PENDING": "yellow",
-            "DEVICE_PENDING": "red",
-        }
-        color.get(state)
+    # If a device name was passed...
+    if device_name:
+        # Fill query with only that device, if it exists
+        device = project_manager.get_device(device_name)
+        if device is None:
+            raise LookupError(f"Device {device_name} not found")
+        queries = [device]
 
-        table.add_row(dev, f"[{color}]{state}[/{color}]")
+    # Otherwise...
+    else:
+        # Fill query with all devices
+        queries = project_manager.get_all_devices()
+    
+    log = set_log_context(device_name or '')
 
-    console.print(table)
+    log.info("Fetching status")
+
+    # Add rows in the table for each query
+    for device in queries:
+        device_state = device.get_state()
+        state_color_mapping.get(device_state)
+        table.add_row(device.name, f"[{state_color_mapping}]{device_state}[/{state_color_mapping}]")
+
+    CONSOLE.print(table)
 
 
 @cli.command()
 @click.argument("device")
-def diff(device):
+def diff(device_name):
     """Show staged CLI commands"""
 
-    dev = project_manager.get_device(device)
-    commands = project_manager.read_staging(dev)
+    device = project_manager.get_device(device_name)
+
+    if device is None:
+        raise LookupError(f"Device {device_name} not found")
+    
+    set_log_context(device_name)
+    
+    commands = project_manager.read_staging(device)
 
     if not commands:
-        console.print("[green]No staged changes[/green]")
+        CONSOLE.print("[green]No staged changes[/green]")
         return
 
     syntax = Syntax(
@@ -89,83 +119,85 @@ def diff(device):
         line_numbers=True
     )
 
-    console.print(Panel(syntax, title=f"{device} - Staged Commands"))
+    CONSOLE.print(Panel(syntax, title=f"{device_name} - Staged Commands"))
 
 
 @cli.command()
 @click.argument("device")
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation")
 @click.option("-m", "--message", help="Commit message")
-def sync(device, yes, message):
+def sync(device_name, yes, message):
     """Push staged changes to device"""
 
-    dev = project_manager.get_device(device)
-    commands = project_manager.read_staging(dev)
+    device = project_manager.get_device(device_name)
+    if not device:
+        raise LookupError(f"Device {device_name} not found")
+
+    set_log_context(device_name)
+
+    commands = project_manager.read_staging(device)
 
     if not commands:
-        console.print("[yellow]No changes to sync[/yellow]")
+        CONSOLE.print("[yellow]No changes to sync[/yellow]")
         return
 
     # Show preview
     syntax = Syntax("\n".join(commands), "bash", theme="monokai")
-    console.print(Panel(syntax, title="Commands to Apply"))
+    CONSOLE.print(Panel(syntax, title="Commands to Apply"))
 
+    # Ask for confirmation if "yes"-option not given
     if not yes:
         if not click.confirm("Apply these changes?"):
-            console.print("[red]Aborted[/red]")
+            CONSOLE.print("[red]Aborted[/red]")
             return
 
-    conn = serial_interface.SerialConnection(dev.tty)
-    conn.login()
+    serial = serial_interface.SerialConnection(device.tty, login=True)
 
-    with console.status("[cyan]Applying configuration...[/cyan]"):
-        conn.send_config(commands)
-
-    git_ops.commit_all(message or f"sync {device}")
-
-    console.print("[green]✔ Sync complete[/green]")
+    with CONSOLE.status("[cyan]Applying configuration...[/cyan]"):
+        serial.send_config(commands)
 
     # Re-pull updated config
-    pull.callback(device, None)
+    fetch_config(device)
+
+    git_ops.commit_all(message or f"sync {device_name}")
+
+    CONSOLE.print("[green] Sync complete[/green]")
 
 
 @cli.command()
 @click.argument("device")
 @click.option("-y", "--yes", is_flag=True)
-def apply(device, yes):
+def commit(device_name, yes):
     """Save running-config to startup-config"""
+
+    device = project_manager.get_device(device_name)
+    if not device:
+        raise LookupError(f"Device {device_name} not found")
+    
+    log = set_log_context(device_name)
 
     if not yes:
         if not click.confirm("Write memory to device?"):
             return
 
-    dev = project_manager.get_device(device)
+    serial = serial_interface.SerialConnection(device.tty, login=True)
 
-    conn = serial_interface.SerialConnection(dev.tty)
-    conn.login()
+    serial.send_command("write memory")
 
-    conn.send_command("write memory")
-
-    console.print(f"[green]✔ Configuration saved on {device}[/green]")
+    log.info("Saved configuration on device")
+    CONSOLE.print(f"[green] Configuration saved on {device_name}[/green]")
 
 
-@cli.command()
-@click.argument("device")
-def commit(device):
-    """Commit current state to git"""
-    git_ops.commit_all(f"commit {device}")
-    console.print(f"[green]✔ Commit created for {device}[/green]")
+def fetch_config(device: Device):
+    serial = serial_interface.SerialConnection(device.tty, login=True)
+    log = get_logger()
+
+    log.debug("Fetching running config")
+    config = serial.get_running_config()
+
+    log.debug(f"Saving config to file {device.config_path}")
+    device.save_config(config)
 
 
-@cli.result_callback()
-def handle_result(*args, **kwargs):
-    pass
-
-
-@cli.errorhandler(Exception)
-def handle_error(e):
-    console.print(f"[red]Error:[/red] {e}")
-
-
-if __name__ == "__main__":
+def main():
     cli()

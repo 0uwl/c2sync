@@ -70,17 +70,17 @@ Command:
 c2sync pull DEVICE [TTY_DEVICE]
 ```
 Behavior:
-* Connect to device via serial. 
+* Pull from an existing device or add a new device to the project if it doesn't already exist
+* DEVICE is the name of the device in the project. It has no correlation to the actual hostname of the device
 * TTY_DEVICE must be specified the first time a device is pulled from
-* Handle AAA login (username/password)
-* Disable paging (`terminal length 0`)
+* Credentials will be prompted for if the device asks for authentication
 * Runs:
   ```
   show running-config brief
   ```
 * Save output to:
   ```
-  ./.c2sync/<DEVICE>.config
+  <project root>/<DEVICE>.config
   ```
 * Auto-commit to project repository:
   ```
@@ -123,7 +123,7 @@ interface GigabitEthernet1/0/1
 ```
 
 > [!NOTE]  
-> _This means that you must be mindful of spaces to declare contexts properly_
+> _This means that you must be mindful of leading spaces to declare contexts properly._
 
 ### 4. Status
 
@@ -132,7 +132,10 @@ Command:
 c2sync status [DEVICE]
 ```
 Behavior:
-* Shows the current state of the devices in this project. This includes which devices have staged changes or unwritten changes in the running config
+* Shows the current state of the devices in this project. The possible states are:
+  * **SYNCED**: All configs, including host config, running config and startup-config are synchronized
+  * **HOST_PENDING**: The host config does not match the running config, but the running config still matches with the startup config on   the device
+  * **DEVICE_PENDING**: The host config matches with the running config, but the running config does not match with the startup config. 
 * Optionally filter to a specific device
 
 ### 5. Diff
@@ -142,7 +145,7 @@ Command:
 c2sync diff DEVICE
 ```
 Behavior:
-* Shows the staged changes of the selected device. These changes have been reconstructed using C2Sync's context rebuilder to reflect the exact commands to be sent to the device
+* Shows the staged changes of the selected device. Changes are reconstructed using C2Sync's context rebuilder to reflect the exact commands to be sent to the device
 
 ### 6. Sync
 
@@ -159,16 +162,16 @@ Behavior:
 * Makes a git commit to the local repository
 * Fetches the new configuration file after changes have been pushed
 
-### 7. Apply
+### 7. Commit
 Command:
 ```
-c2sync apply [options] DEVICE
+c2sync commit [options] DEVICE
 
 Options:
-    -y    Apply changes without confirmation
+    -y    Commit changes without confirmation
 ```
 Behavior:
-* Apply changes in the device's running config to its startup config
+* Commit changes from the device's running config to its startup config
 
 
 ## Disclamer
