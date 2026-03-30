@@ -6,7 +6,8 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.syntax import Syntax
 
-from c2sync import git_ops, project_manager, serial_interface
+from c2sync import project_manager, serial_interface
+from c2sync.git_ops import GitHandler
 from c2sync.logger import get_logger, setup_logging, set_log_context
 from c2sync.models import Device
 
@@ -25,7 +26,8 @@ def init():
     if not result:
         CONSOLE.print("\n[yellow]Project already initialized here[/yellow]\n")
         return
-    git_ops.init_repo(".")
+    
+    GitHandler.init_repo()
 
     log = set_log_context()
 
@@ -48,7 +50,7 @@ def pull(device_name: str, tty: str):
     fetch_config(device)
 
     log.debug("Committing to ")
-    git_ops.commit_all(f"pulled from {device_name}")
+    GitHandler.commit_all(f"pulled from {device_name}")
 
     CONSOLE.print(f"\n[green]Pulled config from {device_name}[/green]\n")
 
@@ -159,7 +161,7 @@ def sync(device_name, yes, message):
     # Re-pull updated config
     fetch_config(device)
 
-    git_ops.commit_all(message or f"sync {device_name}")
+    GitHandler.commit_all(message or f"sync {device_name}")
 
     CONSOLE.print("[green] Sync complete[/green]")
 

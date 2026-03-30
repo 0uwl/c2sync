@@ -3,13 +3,31 @@ from dataclasses import dataclass
 
 from c2sync.serial_interface import SerialConnection
 
+@dataclass(frozen=True)
+class ConfigLine:
+    """
+    Represents a line in the configuration file.
+    """
+    index: int
+    text: str
+    indent: int
+
+
+@dataclass(frozen=True)
+class CommandBlock:
+    """
+    Represents a CLI command with its full hierarchical context.
+    """
+    context: tuple[str, ...]
+    command: str
+
+
 @dataclass
 class DeviceState:
     SYNCED = "SYNCED"
     HOST_PENDING = "HOST_PENDING"
     DEVIE_PENDING = "DEVIE_PENDING"
     HOST_PENDING = "HOST_PENDING"
-
 
 class Device:
     """

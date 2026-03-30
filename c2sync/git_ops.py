@@ -1,15 +1,20 @@
 from pathlib import Path
-from git import Repo, InvalidGitRepositoryError, NoSuchPathError, GitCommandError
+from git import Repo, InvalidGitRepositoryError, NoSuchPathError
+
+from typing import Optional
+
 
 # ---------------------------
 # Repo Management
 # ---------------------------
+REPO_PATH = Path(".")
 
-def init_repo(path: str = ".") -> Repo:
+
+def init_repo() -> Repo:
     """
     Initialize a git repository if it does not exist.
     """
-    repo_path = Path(path)
+    repo_path = Path(REPO_PATH)
 
     try:
         repo = Repo(repo_path)
@@ -19,33 +24,24 @@ def init_repo(path: str = ".") -> Repo:
         return repo
 
 
-def get_repo(path: str = ".") -> Repo:
+def get_repo() -> Repo:
     """
     Get an existing repo or raise error if not initialized.
     """
     try:
-        return Repo(path)
+        return Repo(REPO_PATH)
     except InvalidGitRepositoryError:
         raise Exception("Not a git repository. Run `c2sync init` first.")
-
-
-def is_repo_initialized(path: str = ".") -> bool:
-    try:
-        Repo(path)
-        return True
-    except InvalidGitRepositoryError:
-        return False
-
 
 # ---------------------------
 # Commit Operations
 # ---------------------------
 
-def commit_all(message: str, path: str = ".") -> None:
+def commit_all(message: str) -> None:
     """
     Stage all changes and commit.
     """
-    repo = get_repo(path)
+    repo = get_repo()
 
     repo.git.add(A=True)
 
@@ -56,92 +52,38 @@ def commit_all(message: str, path: str = ".") -> None:
         # Optional: silently ignore or log
         pass
 
-
-def commit_file(file_path: str, message: str) -> None:
-    """
-    Commit a specific file.
-    """
-    repo = get_repo()
-
-    repo.git.add(file_path)
-
-    if repo.is_dirty(untracked_files=True):
-        repo.index.commit(message)
-
-
 # ---------------------------
-# Diff Operations
+# Getters
 # ---------------------------
 
-def get_diff(file_path: Path) -> list[str]:
-    """
-    Get git diff for a specific file (working tree vs index).
-    """
+def get_last_committed_version(file_path: Path) -> list[str]:
     repo = get_repo()
-
-    try:
-        diff: str = repo.git.diff(str(file_path))
-        return [
-            line[1:]
-            for line in diff.splitlines()
-            if line.startswith("+") and not line.startswith("+++")
-        ]
-    except GitCommandError as e:
-        raise Exception(f"Failed to get diff: {e}")
-
-
-def get_staged_diff(file_path: Path) -> str:
-    """
-    Get diff of staged changes.
-    """
-    repo = get_repo()
-
-    try:
-        return repo.git.diff("--cached", str(file_path))
-    except GitCommandError as e:
-        raise Exception(f"Failed to get staged diff: {e}")
-
-
-def get_full_diff() -> str:
-    """
-    Get full repo diff.
-    """
-    repo = get_repo()
-    return repo.git.diff()
-
+    blob = repo.head.commit.tree / str(file_path)
+    return blob.data_stream.read().decode().splitlines()
 
 # ---------------------------
 # Status Helpers
 # ---------------------------
 
-def has_changes(path: str = ".") -> bool:
+def has_changes() -> bool:
     """
     Check if repo has uncommitted changes.
     """
-    repo = get_repo(path)
+    repo = get_repo()
     return repo.is_dirty(untracked_files=True)
-
-
-def file_has_changes(file_path: Path) -> bool:
-    """
-    Check if a specific file has changes.
-    """
-    diff = get_diff(file_path)
-    return bool(diff)
-
 
 # ---------------------------
 # History / Info
 # ---------------------------
 
-def get_last_commit_message(path: str = ".") -> str:
-    repo = get_repo(path)
+def get_last_commit_message() -> str:
+    repo = get_repo()
     head_commit_message = str(repo.head.commit.message)
     return head_commit_message
 
 
-def get_last_commit_hash(path: str = ".") -> str:
-    repo = get_repo(path)
+def get_last_commit_hash() -> str:
+    repo = get_repo()
     return repo.head.commit.hexsha
 
 
@@ -160,7 +102,6 @@ def log(limit: int = 5):
 
     return commits
 
-
 # ---------------------------
 # Safety Utilities
 # ---------------------------
@@ -175,7 +116,7 @@ def ensure_clean_working_tree():
         )
 
 
-def ensure_file_tracked(file_path: Path):
+def ensure_file_tracked(, file_path: Path):
     """
     Ensure a file is tracked by git.
     """
@@ -183,3 +124,71 @@ def ensure_file_tracked(file_path: Path):
 
     if str(file_path) not in repo.git.ls_files():
         raise Exception(f"{file_path} is not tracked by git.")
+    
+
+# ----------------------------
+# File discovery
+# ----------------------------
+
+def get_tracked_config_files() -> list[str]:
+    """
+    Return tracked .config files (excluding .c2sync/)
+    """
+    files = []
+
+    repo = get_repo()
+
+    for (filepath, _stage) in repo.index.entries.keys():
+        filepath = str(filepath)
+        if filepath.endswith(".config") and not filepath.startswith(".c2sync/"):
+            files.append(filepath)
+
+    return files
+
+
+def get_changed_config_files() -> list[str]:
+    """
+    Return only modified .config files (working tree vs index)
+    """
+    changed = []
+
+    repo = get_repo()
+
+    diffs = repo.index.diff(None)
+
+    for diff in diffs:
+        filepath = str(diff.a_path)
+        if filepath.endswith(".config") and not filepath.startswith(".c2sync/"):
+            changed.append(filepath)
+
+    return changed
+
+
+# ----------------------------
+# File content access
+# ----------------------------
+
+def get_head_file(filepath: str) -> Optional[str]:
+    """
+    Get file content from HEAD commit
+    """
+
+    repo = get_repo()
+    
+    try:
+        blob = repo.head.commit.tree / filepath
+        return blob.data_stream.read().decode()
+    except Exception:
+        return None
+
+
+def get_working_file(filepath: str) -> Optional[str]:
+    """
+    Get file content from working directory
+    """
+    full_path = REPO_PATH / filepath
+
+    if not full_path.exists():
+        return None
+
+    return full_path.read_text()

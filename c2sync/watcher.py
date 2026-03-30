@@ -1,29 +1,73 @@
-import time
+# c2sync/watcher.py
 
-from c2sync import diff_engine, git_ops, project_manager
-from c2sync.logger import get_logger
-from c2sync.models import Device
+from pathlib import Path
+from typing import Optional
 
-def watch(device):
-    dev = project_manager.get_device(device)
-
-    last_mtime = 0
-
-    while True:
-        mtime = dev.config_path.stat().st_mtime
-
-        if mtime != last_mtime:
-            handle_change(dev)
-            last_mtime = mtime
-
-        time.sleep(1)
+from c2sync.git_ops import GitHandler
+from c2sync.diff_engine import build_staging
 
 
-def handle_change(device: Device):
-    diff = git_ops.get_diff(device.config_path)
+class Watcher:
+    """
+    On-demand staging builder.
 
-    file_lines = device.config_path.read_text().splitlines()
+    Uses Git to:
+    - Compare HEAD vs working tree
+    - Generate CLI staging config
+    """
+    REPO_PATH = GitHandler.REPO_PATH
 
-    commands = diff_engine.recontextualize_lines(file_lines, diff)
+    @classmethod
+    def _write_staging(cls, device: str, content: str):
+        staging_path = cls.REPO_PATH / ".c2sync" / f".{device}.staging"
+        staging_path.parent.mkdir(exist_ok=True)
+        staging_path.write_text(content)
 
-    device.staging_path.write_text("\n".join(commands))
+    @classmethod
+    def _build_staging_text(cls, filepath: str) -> Optional[str]:
+        """
+        Core diff logic
+        """
+        old_file = GitHandler.get_head_file(filepath)
+        new_file = GitHandler.get_working_file(filepath)
+
+        if old_file is None or new_file is None:
+            return None
+
+        if old_file == new_file:
+            return ""
+        
+        staging_lines = build_staging(old_file.split(), new_file.split())
+
+        return staging_lines
+
+    @classmethod
+    def build_for_device(cls, device: str):
+        """
+        Build staging file for a single device
+        """
+        filepath = f"{device}.config"
+
+        result = cls._build_staging_text(filepath)
+
+        if result is None:
+            print(f"[WATCHER] Skipping {device} (missing file)")
+            return
+
+        cls._write_staging(device, result)
+
+        if result == "":
+            print(f"[WATCHER] {device} unchanged")
+        else:
+            print(f"[WATCHER] Staging updated for {device}")
+
+    @classmethod
+    def build_changed(cls):
+        """
+        Build staging for modified configs
+        """
+        files = GitHandler.get_changed_config_files()
+
+        for filepath in files:
+            device = Path(filepath).stem
+            cls.build_for_device(device)
