@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Optional
 
-from c2sync.git_ops import GitHandler
+from c2sync import git_ops
 from c2sync.diff_engine import build_staging
 
 
@@ -15,7 +15,7 @@ class Watcher:
     - Compare HEAD vs working tree
     - Generate CLI staging config
     """
-    REPO_PATH = GitHandler.REPO_PATH
+    REPO_PATH = git_ops.REPO_PATH
 
     @classmethod
     def _write_staging(cls, device: str, content: str):
@@ -28,8 +28,8 @@ class Watcher:
         """
         Core diff logic
         """
-        old_file = GitHandler.get_head_file(filepath)
-        new_file = GitHandler.get_working_file(filepath)
+        old_file = git_ops.get_head_file(filepath)
+        new_file = git_ops.get_working_file(filepath)
 
         if old_file is None or new_file is None:
             return None
@@ -66,7 +66,7 @@ class Watcher:
         """
         Build staging for modified configs
         """
-        files = GitHandler.get_changed_config_files()
+        files = git_ops.get_changed_config_files()
 
         for filepath in files:
             device = Path(filepath).stem

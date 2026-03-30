@@ -116,7 +116,7 @@ def ensure_clean_working_tree():
         )
 
 
-def ensure_file_tracked(, file_path: Path):
+def ensure_file_tracked(file_path: Path):
     """
     Ensure a file is tracked by git.
     """
