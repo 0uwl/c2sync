@@ -7,3 +7,4 @@ __pycache__/
 c2sync.egg-info/
 .pytest_cache/
 dist/
+build/

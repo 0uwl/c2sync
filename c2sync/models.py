@@ -1,24 +1,11 @@
 from pathlib import Path
-from dataclasses import dataclass
-from enum import StrEnum
-
-@dataclass(frozen=True)
-class ConfigLine:
-    """
-    Represents a line in the configuration file.
-    """
-    index: int
-    text: str
-    indent: int
-
-
-@dataclass(frozen=True)
-class CommandBlock:
-    """
-    Represents a CLI command with its full hierarchical context.
-    """
-    context: tuple[str, ...]
-    command: str
+try:
+    from enum import StrEnum
+except ImportError:
+    from enum import Enum
+    class StrEnum(str, Enum):
+        def __str__(self):
+            return self.value
 
 
 class DeviceState(StrEnum):
@@ -26,10 +13,11 @@ class DeviceState(StrEnum):
     HOST_PENDING = "HOST_PENDING"
     DEVICE_PENDING = "DEVICE_PENDING"
 
+
 class Device:
     """
     A class representing devices included in the project. Contains a name and the TTY device used to communicate with the device,
-    as well as the path to the pulled config file and its staging file 
+    as well as the path to the pulled config file and its staging file
     """
     def __init__(self, name: str, tty: str):
         self.name = name
@@ -51,4 +39,3 @@ class Device:
             "name": self.name,
             "tty": self.tty,
         }
-    

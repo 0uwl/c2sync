@@ -14,6 +14,7 @@ from rich.syntax import Syntax
 
 from c2sync import project_manager, serial_interface, staging_builder
 from c2sync import git_ops
+from c2sync.config_validator import validate_config
 from c2sync.logger import get_logger, setup_logging, set_log_context
 from c2sync.models import Device, DeviceState
 
@@ -260,6 +261,9 @@ def fetch_config(device: Device):
 
     log.debug(f"Saving config to file {device.config_path}")
     device.save_config(config)
+
+    for warning in validate_config(config.splitlines()):
+        CONSOLE.print(f"[yellow]Warning: {warning}[/yellow]")
 
 
 def main():

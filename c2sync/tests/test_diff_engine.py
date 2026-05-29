@@ -24,8 +24,8 @@ def test_empty_diff_returns_empty_string():
     assert build_staging(config, config) == ""
 
 
-def test_only_deletions_returns_empty_string():
-    """Deleted lines are intentionally ignored by the tool."""
+def test_leaf_deletion_generates_no_command():
+    """Removing a child line generates a 'no' command in the parent context."""
     old = lines("""
         hostname Router1
         interface Gi1/0/1
@@ -35,7 +35,44 @@ def test_only_deletions_returns_empty_string():
         hostname Router1
         interface Gi1/0/1
     """)
-    assert build_staging(old, new) == ""
+    result = build_staging(old, new)
+    result_lines = result.splitlines()
+    assert "interface Gi1/0/1" in result_lines
+    assert "no description OLD" in result_lines
+
+
+def test_parent_block_deletion_generates_no_parent_only():
+    """Removing an entire block emits a single 'no <parent>' — not one 'no' per child."""
+    old = lines("""
+        interface Gi1/0/1
+         description Server
+         shutdown
+    """)
+    new = ["hostname Router1"]
+    result = build_staging(old, new)
+    result_lines = result.splitlines()
+    assert "no interface Gi1/0/1" in result_lines
+    assert "no description Server" not in result_lines
+    assert "no shutdown" not in result_lines
+
+
+def test_additions_and_deletions_combined():
+    """Edits that both add and remove lines within the same context are handled together."""
+    old = lines("""
+        interface Gi1/0/1
+         description OLD
+    """)
+    new = lines("""
+        interface Gi1/0/1
+         description NEW
+         shutdown
+    """)
+    result = build_staging(old, new)
+    result_lines = result.splitlines()
+    assert "interface Gi1/0/1" in result_lines
+    assert "description NEW" in result_lines
+    assert "shutdown" in result_lines
+    assert "no description OLD" in result_lines
 
 
 # ---------------------------------------------------------------------------

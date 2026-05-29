@@ -9,12 +9,69 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 die() { echo "Error: $*" >&2; exit 1; }
 
-# ── preflight ─────────────────────────────────────────────────────────────────
+# ── system dependency check ───────────────────────────────────────────────────
 
 command -v python3 &>/dev/null || die "python3 is required but not found."
 
 python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)" \
     || die "Python 3.9+ required (found $(python3 --version))."
+
+install_system_deps() {
+    local pkgs=("$@")
+    if command -v apt-get &>/dev/null; then
+        local apt_pkgs=()
+        for p in "${pkgs[@]}"; do
+            case "${p}" in
+                git)          apt_pkgs+=("git") ;;
+                python3-venv) apt_pkgs+=("python3-venv") ;;
+            esac
+        done
+        sudo apt-get install -y "${apt_pkgs[@]}"
+    elif command -v dnf &>/dev/null; then
+        local dnf_pkgs=()
+        for p in "${pkgs[@]}"; do
+            case "${p}" in
+                git)          dnf_pkgs+=("git") ;;
+                python3-venv) dnf_pkgs+=("python3") ;;
+            esac
+        done
+        sudo dnf install -y "${dnf_pkgs[@]}"
+    elif command -v pacman &>/dev/null; then
+        local pac_pkgs=()
+        for p in "${pkgs[@]}"; do
+            case "${p}" in
+                git)          pac_pkgs+=("git") ;;
+                python3-venv) pac_pkgs+=("python") ;;
+            esac
+        done
+        sudo pacman -S --noconfirm "${pac_pkgs[@]}"
+    elif command -v zypper &>/dev/null; then
+        local zy_pkgs=()
+        for p in "${pkgs[@]}"; do
+            case "${p}" in
+                git)          zy_pkgs+=("git") ;;
+                python3-venv) zy_pkgs+=("python3-virtualenv") ;;
+            esac
+        done
+        sudo zypper install -y "${zy_pkgs[@]}"
+    else
+        die "No supported package manager found. Install manually: ${pkgs[*]}"
+    fi
+}
+
+MISSING=()
+command -v git &>/dev/null          || MISSING+=("git")
+python3 -m venv --help &>/dev/null  || MISSING+=("python3-venv")
+
+if [ ${#MISSING[@]} -gt 0 ]; then
+    echo "Missing system dependencies: ${MISSING[*]}"
+    read -r -p "Install them now? [y/N] " REPLY
+    if [[ "${REPLY}" =~ ^[Yy]$ ]]; then
+        install_system_deps "${MISSING[@]}"
+    else
+        die "Cannot proceed without required dependencies."
+    fi
+fi
 
 WHEEL=$(ls "${SCRIPT_DIR}/wheels/c2sync-"*.whl 2>/dev/null | head -1)
 [ -n "${WHEEL}" ] || die "c2sync wheel not found in wheels/. Re-run build.sh."
@@ -53,7 +110,7 @@ PIP="${INSTALL_DIR}/venv/bin/pip"
 echo "Installing dependencies..."
 "${PIP}" install --quiet --no-index \
     --find-links="${INSTALL_DIR}/wheels" \
-    pyserial watchdog pytest click rich gitpython
+    pyserial watchdog click rich gitpython
 
 echo "Installing c2sync..."
 "${PIP}" install --quiet --no-index --no-deps "${INSTALL_DIR}/wheels/$(basename "${WHEEL}")"

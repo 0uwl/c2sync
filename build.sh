@@ -9,8 +9,11 @@ DIST_NAME="c2sync-${VERSION}"
 BUILD_DIR=$(mktemp -d)
 STAGE="${BUILD_DIR}/${DIST_NAME}"
 
-cleanup() { rm -rf "${BUILD_DIR}"; }
+cleanup() { rm -rf "${BUILD_DIR}" "${SCRIPT_DIR}/build"; }
 trap cleanup EXIT
+
+echo "Running tests..."
+python3 -m pytest c2sync/tests/ -q || { echo "Tests failed — aborting build."; exit 1; }
 
 echo "Building c2sync ${VERSION}..."
 
@@ -21,12 +24,13 @@ python3 -m pip wheel . --no-deps -w "${STAGE}/wheels" -q
 
 # Download all runtime dependencies (including transitive deps) as wheels
 python3 -m pip download \
-    pyserial watchdog pytest click rich gitpython \
+    pyserial watchdog click rich gitpython \
     -d "${STAGE}/wheels" -q
 
-# Bundle the install script
+# Bundle the install/uninstall scripts
 cp "${SCRIPT_DIR}/install.sh" "${STAGE}/install.sh"
-chmod +x "${STAGE}/install.sh"
+cp "${SCRIPT_DIR}/uninstall.sh" "${STAGE}/uninstall.sh"
+chmod +x "${STAGE}/install.sh" "${STAGE}/uninstall.sh"
 
 mkdir -p "${SCRIPT_DIR}/dist"
 OUTPUT="${SCRIPT_DIR}/dist/${DIST_NAME}.tar.gz"

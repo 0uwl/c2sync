@@ -1,7 +1,8 @@
 from pathlib import Path
 import pytest
 
-from c2sync.models import Device, DeviceState, ConfigLine, CommandBlock
+from c2sync.diff_engine import CommandBlock
+from c2sync.models import Device, DeviceState
 
 
 # ---------------------------------------------------------------------------
@@ -73,21 +74,8 @@ def test_device_name_and_tty_stored():
 
 
 # ---------------------------------------------------------------------------
-# ConfigLine / CommandBlock (used by diff engine)
+# CommandBlock (internal to diff engine)
 # ---------------------------------------------------------------------------
-
-def test_config_line_fields():
-    cl = ConfigLine(index=3, text=" description test", indent=1)
-    assert cl.index == 3
-    assert cl.text == " description test"
-    assert cl.indent == 1
-
-
-def test_config_line_is_frozen():
-    cl = ConfigLine(index=0, text="hostname R1", indent=0)
-    with pytest.raises(Exception):
-        cl.index = 1  # type: ignore
-
 
 def test_command_block_fields():
     cb = CommandBlock(context=("interface Gi1/0/1",), command="shutdown")

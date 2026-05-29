@@ -4,6 +4,7 @@ from typing import Optional
 from rich.console import Console
 
 from c2sync import git_ops, project_manager
+from c2sync.config_validator import validate_staging
 from c2sync.diff_engine import build_staging
 from c2sync.models import Device
 
@@ -52,6 +53,8 @@ def write_device(device: Device):
     if content == "":
         CONSOLE.print(f"[yellow]{device.config_path} unchanged[/yellow]")
     else:
+        for warning in validate_staging(content.splitlines()):
+            CONSOLE.print(f"[yellow]Warning: {warning}[/yellow]")
         CONSOLE.print(f"[green]Staging updated for {device.config_path}[/green]")
 
 

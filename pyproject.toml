@@ -11,10 +11,15 @@ requires-python = ">=3.9"
 dependencies = [
   "pyserial",
   "watchdog",
-  "pytest",
   "click",
   "rich",
-  "gitpython"
+  "gitpython",
+  "ciscoconfparse2"
+]
+
+[dependency-groups]
+dev = [
+  "pytest",
 ]
 
 [project.scripts]

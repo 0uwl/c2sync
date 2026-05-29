@@ -29,6 +29,17 @@ The project directory contains:
 
 One project can be used for many devices. 
 
+## System Requirements
+
+| Dependency | Notes |
+|---|---|
+| Python 3.9+ | |
+| git | Required for config version tracking |
+| python3-venv | Debian/Ubuntu only — included with Python on Fedora, Arch, and most others |
+
+> [!NOTE]
+> To communicate with devices over serial your user must be in the `dialout` group (Debian/Ubuntu) or `uucp` group (Arch). Add yourself with `sudo usermod -aG dialout $USER` and log out/in for it to take effect.
+
 ## Installation
 
 ### From a release tarball (recommended)
@@ -52,11 +63,10 @@ Verify the installation:
 c2sync --help
 ```
 
-To uninstall, remove the install directory and launcher:
+To uninstall, run the bundled script from the extracted tarball:
 
 ```bash
-rm -rf ~/.local/share/c2sync
-sudo rm /usr/local/bin/c2sync
+./uninstall.sh
 ```
 
 ### From source (development)
