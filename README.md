@@ -174,6 +174,32 @@ Behavior:
 * Commit changes from the device's running config to its startup config
 
 
+## TODO
+
+### Bugs
+
+- [x] **`staging_builder.py`** — `@staticmethod` used outside a class; `write_device` and `write_changed` are not callable as module-level functions. Remove the decorators.
+- [x] **`project_manager.py:67`** — `device_registry.keys` missing `()`, so device lookup always fails and every call creates a new entry.
+- [x] **`models.py`** — `DeviceState.HOST_PENDING` is assigned twice (second overwrites first) and `DEVICE_PENDING` is misspelled as `DEVIE_PENDING`.
+- [x] **`models.py`** — `Device.get_state()` logic is inverted: `is_config_synced() == True` returns `DEVICE_PENDING` when it should return `SYNCED`.
+- [x] **`serial_interface.py`** — `send()` and `login()` are stubbed/commented out; `send_command()` returns `None`, so `get_running_config()` saves an empty file.
+
+### Overcomplications
+
+- [ ] Replace `contextvars`-based logger with a module-level logger + filter — `contextvars` is for async/multithreaded code, not a single-threaded CLI.
+- [ ] Replace `DeviceState` class-with-string-constants with a proper `Enum`.
+- [ ] Remove `config_path` and `staging_path` from `registry.json` — both are fully derived from `device.name` and storing them creates redundant, potentially stale data.
+- [ ] Move serial connection out of `Device.get_state()` — a data class should not open hardware connections. State checking belongs in the command layer.
+
+### Missing Features
+
+- [ ] `c2sync list` — no command to show registryed devices.
+- [ ] `c2sync remove <device>` — no way to deregistry a device or clean up its files.
+- [ ] Fix and wire up `staging_builder.write_changed()` — currently passes a string stem instead of a `Device` object and is never called.
+- [ ] Fully implement serial interface — wire `read_until_prompt()` into `send_command()` and re-enable `login()`.
+- [ ] Add TTY path validation before opening serial port (`Path(tty).exists()`).
+- [ ] Fix example workflow in docs — references `c2sync apply` which does not exist (should be `c2sync sync`).
+
 ## Disclamer
 * This tool assumes familiarity with network device CLI. You must adhere to Cisco IOS' configuration syntax
 * The tool does not validate commands before sending. You must review the preview yourself before commiting it.

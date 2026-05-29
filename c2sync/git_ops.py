@@ -168,7 +168,7 @@ def get_changed_config_files() -> list[str]:
 # File content access
 # ----------------------------
 
-def get_head_file(filepath: str) -> Optional[str]:
+def get_head_file(filepath: Path) -> Optional[str]:
     """
     Get file content from HEAD commit
     """
@@ -182,7 +182,7 @@ def get_head_file(filepath: str) -> Optional[str]:
         return None
 
 
-def get_working_file(filepath: str) -> Optional[str]:
+def get_working_file(filepath: Path) -> Optional[str]:
     """
     Get file content from working directory
     """

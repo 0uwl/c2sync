@@ -6,7 +6,7 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.syntax import Syntax
 
-from c2sync import project_manager, serial_interface
+from c2sync import project_manager, serial_interface, staging_builder
 from c2sync import git_ops
 from c2sync.logger import get_logger, setup_logging, set_log_context
 from c2sync.models import Device
@@ -106,7 +106,9 @@ def diff(device_name):
     if device is None:
         raise LookupError(f"Device {device_name} not found")
     
-    set_log_context(device_name)
+    set_log_context(device.name)
+
+    staging_builder.write_device(device)
     
     commands = project_manager.read_staging(device)
 
@@ -135,7 +137,9 @@ def sync(device_name, yes, message):
     if not device:
         raise LookupError(f"Device {device_name} not found")
 
-    set_log_context(device_name)
+    set_log_context(device.name)
+
+    staging_builder.write_device(device)
 
     commands = project_manager.read_staging(device)
 

@@ -4,7 +4,7 @@ from pathlib import Path
 from c2sync.models import Device
 
 C2SYNC_DIR = Path(".c2sync/")
-REGISTRY = C2SYNC_DIR / "register.json"
+REGISTRY = C2SYNC_DIR / "registry.json"
 
 
 def init_project():
@@ -64,7 +64,7 @@ def get_device(name, tty: str='') -> Device:
     device_registry = load_registry()
 
     # If the device name isn't in the registry we create a new entry
-    if name not in device_registry.keys:
+    if name not in device_registry.keys():
         if not tty:
             raise ValueError("TTY_DEVICE required for first pull")
         _create_device(name, tty)

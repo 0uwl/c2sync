@@ -26,8 +26,7 @@ class CommandBlock:
 class DeviceState:
     SYNCED = "SYNCED"
     HOST_PENDING = "HOST_PENDING"
-    DEVIE_PENDING = "DEVIE_PENDING"
-    HOST_PENDING = "HOST_PENDING"
+    DEVICE_PENDING = "DEVICE_PENDING"
 
 class Device:
     """
@@ -61,9 +60,9 @@ class Device:
         if self.staging_path.exists() and self.staging_path.stat().st_size > 0:
             return DeviceState.HOST_PENDING
         elif serial.is_config_synced():
-            return DeviceState.DEVIE_PENDING
-        else:
             return DeviceState.SYNCED
+        else:
+            return DeviceState.DEVICE_PENDING
 
     def to_dict(self) -> dict[str, str]:
         return {

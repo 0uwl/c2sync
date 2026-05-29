@@ -31,7 +31,7 @@ class SerialConnection:
 
     def send(self, cmd):
         self.log.debug(f"Sending command '{cmd}'")
-        # self.conn.write((cmd + "\n").encode())
+        self.conn.write((cmd + "\n").encode())
 
     def read_until_prompt(self, prompt=PROMPT_REGEX):
         buffer = ""
@@ -54,7 +54,7 @@ class SerialConnection:
 
     def send_command(self, cmd):
         self.send(cmd)
-        # return self.read_until_prompt()
+        return self.read_until_prompt()
 
     def enter_config_mode(self):
         self.send_command("configure terminal")
