@@ -1,6 +1,6 @@
 [project]
 name = "c2sync"
-version = "0.1.0"
+version = "0.2.0"
 description = "Console Config Sync tool for network devices"
 authors = [
   { name="0uwl", email="ouwl.person@proton.me" }
