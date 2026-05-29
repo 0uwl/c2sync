@@ -13,8 +13,8 @@ die() { echo "Error: $*" >&2; exit 1; }
 
 command -v python3 &>/dev/null || die "python3 is required but not found."
 
-python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)" \
-    || die "Python 3.9+ required (found $(python3 --version))."
+python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" \
+    || die "Python 3.10+ required (found $(python3 --version))."
 
 install_system_deps() {
     local pkgs=("$@")
@@ -108,9 +108,11 @@ python3 -m venv "${INSTALL_DIR}/venv"
 PIP="${INSTALL_DIR}/venv/bin/pip"
 
 echo "Installing dependencies..."
-"${PIP}" install --quiet --no-index \
-    --find-links="${INSTALL_DIR}/wheels" \
-    pyserial watchdog click rich gitpython
+dep_wheels=()
+for w in "${INSTALL_DIR}/wheels/"*.whl; do
+    [[ "$(basename "$w")" != c2sync-* ]] && dep_wheels+=("$w")
+done
+"${PIP}" install --quiet "${dep_wheels[@]}"
 
 echo "Installing c2sync..."
 "${PIP}" install --quiet --no-index --no-deps "${INSTALL_DIR}/wheels/$(basename "${WHEEL}")"

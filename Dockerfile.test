@@ -1,0 +1,17 @@
+FROM python:3.10.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy only the pre-built tarball produced by build.sh
+COPY dist/c2sync-*.tar.gz /tmp/
+
+# Extract and run the install script
+RUN tar -xzf /tmp/c2sync-*.tar.gz -C /tmp \
+    && cd /tmp/c2sync-* \
+    && chmod +x install.sh \
+    && ./install.sh
+
+# Smoke-test: verify the installed binary responds
+RUN c2sync --help
