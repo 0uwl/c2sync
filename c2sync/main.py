@@ -13,6 +13,7 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 
 from c2sync import project_manager, serial_interface, staging_builder
+from c2sync.serial_interface import discover_serial_ports
 from c2sync import git_ops
 from c2sync.config_validator import validate_config
 from c2sync.logger import get_logger, setup_logging, set_log_context
@@ -86,21 +87,51 @@ def remove(device_name: str, yes: bool):
     CONSOLE.print(f"[green]Removed device '{device_name}'[/green]")
 
 
+def _select_tty(ports: list[dict]) -> str:
+    """Prompt the user to pick a serial port, auto-selecting if exactly one Cisco device is found."""
+    if not ports:
+        CONSOLE.print(
+            "[red]No serial TTY devices found. Check that your USB-serial adapter "
+            "is connected and your user is in the 'dialout' group.[/red]"
+        )
+        raise SystemExit(1)
+
+    cisco_ports = [p for p in ports if p["is_cisco"]]
+    if len(cisco_ports) == 1:
+        p = cisco_ports[0]
+        CONSOLE.print(f"[green]Auto-selected Cisco device:[/green] {p['device']}  [dim]({p['description']})[/dim]")
+        return p["device"]
+
+    CONSOLE.print("\n[cyan]Detected serial ports:[/cyan]")
+    for i, p in enumerate(ports, start=1):
+        CONSOLE.print(f"  [bold]\\[{i}][/bold] {p['device']}  [dim]({p['description']})[/dim]")
+
+    choice = click.prompt(f"\nSelect port", type=click.IntRange(1, len(ports)))
+    return ports[choice - 1]["device"]
+
+
 @cli.command()
 @click.argument("device_name", metavar="DEVICE")
 @click.argument("tty", required=False)
-def pull(device_name: str, tty: str):
+def pull(device_name: str, tty: str | None):
     """Pull running config from device"""
 
     log = set_log_context(device_name)
-    device = project_manager.get_device(device_name, tty)
 
-    log.info(f"Connecting to {device_name} over {tty}")
+    if not tty:
+        registry = project_manager.load_registry()
+        if device_name not in registry:
+            CONSOLE.print("[cyan]Scanning for serial TTY devices via udev...[/cyan]")
+            ports = discover_serial_ports()
+            tty = _select_tty(ports)
+
+    device = project_manager.get_device(device_name, tty or '')
+
+    log.info(f"Connecting to {device_name} over {device.tty}")
     CONSOLE.print(f"\n[cyan]Connecting to {device_name}...[/cyan]\n")
 
     fetch_config(device)
 
-    log.debug("Committing to ")
     git_ops.commit_all(f"pulled from {device_name}")
 
     CONSOLE.print(f"\n[green]Pulled config from {device_name}[/green]\n")

@@ -12,6 +12,41 @@ PROMPT_REGEX = re.compile(r"[>#]\s?$")
 LOGIN_PROMPT_REGEX = re.compile(r"[>#:]\s?$")
 
 
+def discover_serial_ports() -> list[dict]:
+    """Use pyudev to enumerate connected ttyUSB/ttyACM devices."""
+    try:
+        import pyudev
+    except ImportError:
+        raise RuntimeError("pyudev is not installed. Run: pip install pyudev")
+
+    context = pyudev.Context()
+    ports = []
+
+    for device in context.list_devices(subsystem="tty"):
+        dev_node = device.properties.get("DEVNAME")
+        if not dev_node:
+            continue
+        if not re.match(r"tty(USB|ACM)\d*", Path(dev_node).name):
+            continue
+        if not Path(dev_node).exists():
+            continue
+
+        parts = []
+        for key in ("ID_VENDOR", "ID_MODEL", "ID_SERIAL_SHORT"):
+            val = device.properties.get(key)
+            if val:
+                parts.append(val.replace("_", " "))
+
+        vendor = device.properties.get("ID_VENDOR", "")
+        ports.append({
+            "device": dev_node,
+            "description": " – ".join(parts) if parts else "Serial device",
+            "is_cisco": "cisco" in vendor.lower(),
+        })
+
+    return sorted(ports, key=lambda p: p["device"])
+
+
 class SerialConnection:
     """
     Creates a serial interface to communicate with a device
