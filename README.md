@@ -31,9 +31,52 @@ One project can be used for many devices.
 
 ## Installation
 
+### From a release tarball (recommended)
+
+Download the latest `c2sync-<version>.tar.gz`, then:
+
 ```bash
-pip install c2sync
+tar -xzf c2sync-<version>.tar.gz
+cd c2sync-<version>
+./install.sh
 ```
+
+The installer will:
+- Create a self-contained virtualenv at `~/.local/share/c2sync/`
+- Install all bundled dependencies offline (no internet required)
+- Place a launcher at `/usr/local/bin/c2sync` (uses `sudo` automatically if needed)
+
+Verify the installation:
+
+```bash
+c2sync --help
+```
+
+To uninstall, remove the install directory and launcher:
+
+```bash
+rm -rf ~/.local/share/c2sync
+sudo rm /usr/local/bin/c2sync
+```
+
+### From source (development)
+
+```bash
+git clone <repo>
+cd c2sync
+pip install -e .
+```
+
+## Building a release tarball
+
+Prerequisites: Python 3.9+ and pip.
+
+```bash
+./build.sh
+```
+
+This produces `dist/c2sync-<version>.tar.gz` containing the application wheel
+and all dependency wheels for offline installation.
 
 ## Usage
 ### CLI Commands

@@ -1,6 +1,12 @@
 import os
+from importlib.metadata import version, PackageNotFoundError
 
 import click
+
+try:
+    _version = version("c2sync")
+except PackageNotFoundError:
+    _version = "unknown"
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -14,6 +20,7 @@ from c2sync.models import Device, DeviceState
 CONSOLE = Console()
 
 @click.group()
+@click.version_option(version=_version, prog_name="c2sync")
 def cli():
     """C2Sync - Console Configuration Synchronizer"""
     setup_logging()
