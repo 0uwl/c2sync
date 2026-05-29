@@ -42,15 +42,15 @@ c2sync commit → SerialConnection.send_command("write memory")
 - **`staging_builder.py`** — Bridges `git_ops` and `diff_engine`. Reads HEAD version and working-tree version of a config file, calls `build_staging`, writes to `device.staging_path`.
 - **`git_ops.py`** — Thin wrapper around GitPython. All paths are relative to `REPO_PATH = Path(".")` (the user's working directory, not the package). `get_head_file` reads from the last commit; `get_working_file` reads from disk.
 - **`serial_interface.py`** — `SerialConnection` wraps pySerial. Prompt detection uses `PROMPT_REGEX = re.compile(r"[>#]\s?$")`. `send_config` enters config mode, sends commands one-by-one, then exits. `is_config_synced` diffs running vs startup config on-device.
-- **`models.py`** — `Device` dataclass (name, tty, config_path, staging_path). `ConfigLine` and `CommandBlock` are the intermediate types used by `diff_engine`. `DeviceState` holds state string constants.
-- **`logger.py`** — Context-var-based logger. `setup_logging()` must run first (called by the Click group). `set_log_context(name)` sets the device prefix. `get_logger()` retrieves it — raises `RuntimeError` if called before setup.
+- **`models.py`** — `Device` class (name, tty; `config_path` and `staging_path` derived from name at runtime). `ConfigLine` and `CommandBlock` are the intermediate types used by `diff_engine`. `DeviceState` is a `StrEnum` with values `SYNCED`, `HOST_PENDING`, `DEVICE_PENDING`.
+- **`logger.py`** — Module-level logger using a `logging.Filter` to inject a `_prefix` string into every record. `setup_logging()` must run first (called by the Click group). `set_log_context(name)` updates the prefix and returns the logger. `get_logger()` always returns the `"c2sync"` logger.
 
 ### Project Directory (created by `c2sync init`)
 
 ```
 <user cwd>/
 ├── .c2sync/
-│   ├── registry.json      # device registry: {name: {name, tty, config_path, staging_path}}
+│   ├── registry.json      # device registry: {name: {name, tty}}
 │   ├── session.log        # rotating log
 │   ├── <device>.config    # pulled running config (also tracked by git)
 │   └── .<device>.staging  # generated CLI commands (hidden, not committed)
@@ -59,7 +59,7 @@ c2sync commit → SerialConnection.send_command("write memory")
 
 ### Device States
 
-Tracked in `Device.get_state()`:
+Determined by `get_device_state(device)` in `main.py`:
 - **SYNCED** — staging file is empty and running-config matches startup-config
 - **HOST_PENDING** — staging file is non-empty (user has edited the config, not yet synced)
 - **DEVICE_PENDING** — staging is empty but running-config differs from startup-config (synced, not yet written to flash)

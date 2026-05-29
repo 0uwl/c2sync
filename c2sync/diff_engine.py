@@ -46,8 +46,8 @@ def _build_changed_lines_model(
     result: list[ConfigLine] = []
 
     for line in changed_lines:
-        if line.strip() in lookup:
-            result.append(lookup[line.strip()])
+        if line.rstrip() in lookup:
+            result.append(lookup[line.rstrip()])
 
     return result
 

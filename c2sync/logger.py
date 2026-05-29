@@ -1,35 +1,38 @@
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-import contextvars
-from typing import Optional
-
-_logger_var: contextvars.ContextVar[Optional[logging.LoggerAdapter]] = (
-    contextvars.ContextVar("logger", default=None)
-)
 
 LOG_FILE_PATH = Path('./.c2sync/session.log')
 
-def setup_logging():
-    handler = RotatingFileHandler(filename=LOG_FILE_PATH)
-    formatter = logging.Formatter("%(levelname)s [%(prefix)s]: %(message)s")
-    handler.setFormatter(formatter)
+_prefix = "Global"
 
+
+class _PrefixFilter(logging.Filter):
+    def filter(self, record):
+        record.prefix = _prefix
+        return True
+
+
+def setup_logging():
     root = logging.getLogger("c2sync")
     root.setLevel(logging.INFO)
     root.handlers.clear()
+
+    if not LOG_FILE_PATH.parent.exists():
+        return
+
+    handler = RotatingFileHandler(filename=LOG_FILE_PATH)
+    formatter = logging.Formatter("%(levelname)s [%(prefix)s]: %(message)s")
+    handler.setFormatter(formatter)
+    handler.addFilter(_PrefixFilter())
     root.addHandler(handler)
 
 
-def set_log_context(context: str = "Global") -> logging.LoggerAdapter:
-    base_logger = logging.getLogger("c2sync")
-    adapter = logging.LoggerAdapter(base_logger, {"prefix": f"{context}"})
-    _logger_var.set(adapter)
-    return adapter
+def set_log_context(context: str = "Global") -> logging.Logger:
+    global _prefix
+    _prefix = context
+    return logging.getLogger("c2sync")
 
 
-def get_logger() -> logging.LoggerAdapter:
-    logger = _logger_var.get()
-    if logger is None:
-        raise RuntimeError("Logger not initialized")
-    return logger
+def get_logger() -> logging.Logger:
+    return logging.getLogger("c2sync")

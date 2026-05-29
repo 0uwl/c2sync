@@ -1,7 +1,6 @@
 from pathlib import Path
 from dataclasses import dataclass
-
-from c2sync.serial_interface import SerialConnection
+from enum import StrEnum
 
 @dataclass(frozen=True)
 class ConfigLine:
@@ -22,8 +21,7 @@ class CommandBlock:
     command: str
 
 
-@dataclass
-class DeviceState:
+class DeviceState(StrEnum):
     SYNCED = "SYNCED"
     HOST_PENDING = "HOST_PENDING"
     DEVICE_PENDING = "DEVICE_PENDING"
@@ -48,27 +46,9 @@ class Device:
         """
         self.config_path.write_text(config)
 
-    def get_state(self) -> str:
-        """
-        Get the current state of the device
-
-        Returns:
-            str: The state of the device
-        """
-        serial = SerialConnection(self.tty)
-
-        if self.staging_path.exists() and self.staging_path.stat().st_size > 0:
-            return DeviceState.HOST_PENDING
-        elif serial.is_config_synced():
-            return DeviceState.SYNCED
-        else:
-            return DeviceState.DEVICE_PENDING
-
     def to_dict(self) -> dict[str, str]:
         return {
             "name": self.name,
             "tty": self.tty,
-            "config_path": str(self.config_path),
-            "staging_path": str(self.staging_path)
         }
     

@@ -1,11 +1,9 @@
-# c2sync/watcher.py
-
 from pathlib import Path
 from typing import Optional
 
 from rich.console import Console
 
-from c2sync import git_ops
+from c2sync import git_ops, project_manager
 from c2sync.diff_engine import build_staging
 from c2sync.models import Device
 
@@ -33,7 +31,7 @@ def _build_staging_content(config_file: Path) -> Optional[str]:
     if old_file == new_file:
         return ""
 
-    return build_staging(old_file.split(), new_file.split())
+    return build_staging(old_file.splitlines(), new_file.splitlines())
 
 
 def write_device(device: Device):
@@ -64,5 +62,10 @@ def write_changed():
     files = git_ops.get_changed_config_files()
 
     for filepath in files:
-        device = Path(filepath).stem
+        device_name = Path(filepath).stem
+        try:
+            device = project_manager.get_device(device_name)
+        except ValueError:
+            CONSOLE.print(f"[yellow]Skipping {filepath} (device '{device_name}' not in registry)[/yellow]")
+            continue
         write_device(device)

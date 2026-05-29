@@ -67,7 +67,7 @@ def get_device(name, tty: str='') -> Device:
     if name not in device_registry.keys():
         if not tty:
             raise ValueError("TTY_DEVICE required for first pull")
-        _create_device(name, tty)
+        return _create_device(name, tty)
 
     return device_registry[name]
 
@@ -103,6 +103,25 @@ def _create_device(name: str, tty: str) -> Device:
     save_registry(device_registry)
 
     return new_device
+
+
+def remove_device(name: str):
+    """Remove a device from the registry and delete its config and staging files.
+
+    Args:
+        name (str): Name of the device to remove
+    """
+    device_registry = load_registry()
+
+    if name not in device_registry:
+        raise ValueError(f"Device '{name}' not found in registry")
+
+    device = device_registry.pop(name)
+    save_registry(device_registry)
+
+    for path in (device.config_path, device.staging_path):
+        if path.exists():
+            path.unlink()
 
 
 def read_staging(device: Device) -> list[str]:

@@ -9,7 +9,7 @@ from rich.syntax import Syntax
 from c2sync import project_manager, serial_interface, staging_builder
 from c2sync import git_ops
 from c2sync.logger import get_logger, setup_logging, set_log_context
-from c2sync.models import Device
+from c2sync.models import Device, DeviceState
 
 CONSOLE = Console()
 
@@ -35,8 +35,51 @@ def init():
     CONSOLE.print("\n[green] New project initialized[/green]\n")
 
 
+@cli.command(name="list")
+def list_devices():
+    """List all registered devices"""
+
+    devices = project_manager.get_all_devices()
+
+    if not devices:
+        CONSOLE.print("[yellow]No devices registered. Use `c2sync pull DEVICE TTY` to add one.[/yellow]")
+        return
+
+    table = Table(title="Registered Devices")
+    table.add_column("Device", style="cyan")
+    table.add_column("TTY", style="green")
+
+    for device in devices:
+        table.add_row(device.name, device.tty)
+
+    CONSOLE.print(table)
+
+
 @cli.command()
-@click.argument("device")
+@click.argument("device_name", metavar="DEVICE")
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation")
+def remove(device_name: str, yes: bool):
+    """Remove a device from the registry and delete its files"""
+
+    log = set_log_context(device_name)
+
+    if not yes:
+        if not click.confirm(f"Remove device '{device_name}' and delete its files?"):
+            CONSOLE.print("[red]Aborted[/red]")
+            return
+
+    try:
+        project_manager.remove_device(device_name)
+    except ValueError:
+        CONSOLE.print(f"[red]Device '{device_name}' not found[/red]")
+        return
+
+    log.info(f"Removed device {device_name}")
+    CONSOLE.print(f"[green]Removed device '{device_name}'[/green]")
+
+
+@cli.command()
+@click.argument("device_name", metavar="DEVICE")
 @click.argument("tty", required=False)
 def pull(device_name: str, tty: str):
     """Pull running config from device"""
@@ -56,7 +99,7 @@ def pull(device_name: str, tty: str):
 
 
 @cli.command()
-@click.argument("device", required=False)
+@click.argument("device_name", metavar="DEVICE", required=False)
 def status(device_name: str = ''):
     """Show device status"""
 
@@ -89,15 +132,15 @@ def status(device_name: str = ''):
 
     # Add rows in the table for each query
     for device in queries:
-        device_state = device.get_state()
-        state_color_mapping.get(device_state)
-        table.add_row(device.name, f"[{state_color_mapping}]{device_state}[/{state_color_mapping}]")
+        device_state = get_device_state(device)
+        color = state_color_mapping.get(device_state, "white")
+        table.add_row(device.name, f"[{color}]{device_state}[/{color}]")
 
     CONSOLE.print(table)
 
 
 @cli.command()
-@click.argument("device")
+@click.argument("device_name", metavar="DEVICE")
 def diff(device_name):
     """Show staged CLI commands"""
 
@@ -127,7 +170,7 @@ def diff(device_name):
 
 
 @cli.command()
-@click.argument("device")
+@click.argument("device_name", metavar="DEVICE")
 @click.option("-y", "--yes", is_flag=True, help="Skip confirmation")
 @click.option("-m", "--message", help="Commit message")
 def sync(device_name, yes, message):
@@ -171,7 +214,7 @@ def sync(device_name, yes, message):
 
 
 @cli.command()
-@click.argument("device")
+@click.argument("device_name", metavar="DEVICE")
 @click.option("-y", "--yes", is_flag=True)
 def commit(device_name, yes):
     """Save running-config to startup-config"""
@@ -192,6 +235,13 @@ def commit(device_name, yes):
 
     log.info("Saved configuration on device")
     CONSOLE.print(f"[green] Configuration saved on {device_name}[/green]")
+
+
+def get_device_state(device: Device) -> DeviceState:
+    if device.staging_path.exists() and device.staging_path.stat().st_size > 0:
+        return DeviceState.HOST_PENDING
+    serial = serial_interface.SerialConnection(device.tty)
+    return DeviceState.SYNCED if serial.is_config_synced() else DeviceState.DEVICE_PENDING
 
 
 def fetch_config(device: Device):

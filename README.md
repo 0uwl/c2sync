@@ -47,6 +47,8 @@ Commands:
   status    Show the current status of a C2Sync session
   diff      Show the current staged changes for a device
   commit    Commit changes from running config to startup config on a device
+  list      List all registered devices
+  remove    Remove a device from the registry and delete its files
 ```
 
 ## General workflow
@@ -173,6 +175,25 @@ Options:
 Behavior:
 * Commit changes from the device's running config to its startup config
 
+### 8. List
+Command:
+```
+c2sync list
+```
+Behavior:
+* Lists all devices registered in the current project with their name and TTY device path
+
+### 9. Remove
+Command:
+```
+c2sync remove [options] DEVICE
+
+Options:
+    -y    Remove without confirmation
+```
+Behavior:
+* Removes the device from the registry and deletes its config and staging files
+
 
 ## TODO
 
@@ -186,19 +207,19 @@ Behavior:
 
 ### Overcomplications
 
-- [ ] Replace `contextvars`-based logger with a module-level logger + filter — `contextvars` is for async/multithreaded code, not a single-threaded CLI.
-- [ ] Replace `DeviceState` class-with-string-constants with a proper `Enum`.
-- [ ] Remove `config_path` and `staging_path` from `registry.json` — both are fully derived from `device.name` and storing them creates redundant, potentially stale data.
-- [ ] Move serial connection out of `Device.get_state()` — a data class should not open hardware connections. State checking belongs in the command layer.
+- [x] Replace `contextvars`-based logger with a module-level logger + filter — `contextvars` is for async/multithreaded code, not a single-threaded CLI.
+- [x] Replace `DeviceState` class-with-string-constants with a proper `Enum`.
+- [x] Remove `config_path` and `staging_path` from `registry.json` — both are fully derived from `device.name` and storing them creates redundant, potentially stale data.
+- [x] Move serial connection out of `Device.get_state()` — a data class should not open hardware connections. State checking belongs in the command layer.
 
 ### Missing Features
 
-- [ ] `c2sync list` — no command to show registryed devices.
-- [ ] `c2sync remove <device>` — no way to deregistry a device or clean up its files.
-- [ ] Fix and wire up `staging_builder.write_changed()` — currently passes a string stem instead of a `Device` object and is never called.
-- [ ] Fully implement serial interface — wire `read_until_prompt()` into `send_command()` and re-enable `login()`.
-- [ ] Add TTY path validation before opening serial port (`Path(tty).exists()`).
-- [ ] Fix example workflow in docs — references `c2sync apply` which does not exist (should be `c2sync sync`).
+- [x] `c2sync list` — no command to show registryed devices.
+- [x] `c2sync remove <device>` — no way to deregistry a device or clean up its files.
+- [x] Fix and wire up `staging_builder.write_changed()` — currently passes a string stem instead of a `Device` object and is never called.
+- [x] Fully implement serial interface — wire `read_until_prompt()` into `send_command()` and re-enable `login()`.
+- [x] Add TTY path validation before opening serial port (`Path(tty).exists()`).
+- [x] Fix example workflow in docs — references `c2sync apply` which does not exist (should be `c2sync sync`).
 
 ## Disclamer
 * This tool assumes familiarity with network device CLI. You must adhere to Cisco IOS' configuration syntax

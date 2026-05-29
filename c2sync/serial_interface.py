@@ -1,12 +1,15 @@
-import serial
+import getpass
 import re
+import serial
 
+from pathlib import Path
 from rich.progress import track
 
 from c2sync.logger import get_logger
 
 
 PROMPT_REGEX = re.compile(r"[>#]\s?$")
+LOGIN_PROMPT_REGEX = re.compile(r"[>#:]\s?$")
 
 
 class SerialConnection:
@@ -21,13 +24,16 @@ class SerialConnection:
             baudrate (int, optional): The baudrate of the serial connection. Defaults to 9600.
             login (bool, optional): If the serial interface should try to log in immediately. Defaults to False.
         """
+        if not Path(tty).exists():
+            raise FileNotFoundError(f"TTY device not found: {tty}")
+
         self.port = tty
         self.baudrate = baudrate
         self.conn = serial.Serial(self.port, self.baudrate, timeout=1)
         self.log = get_logger()
 
-        # if login:
-        #     self.login()
+        if login:
+            self.login()
 
     def send(self, cmd):
         self.log.debug(f"Sending command '{cmd}'")
@@ -43,14 +49,15 @@ class SerialConnection:
         return buffer
 
     def login(self):
-        output = self.read_until_prompt()
+        output = self.read_until_prompt(LOGIN_PROMPT_REGEX)
 
         if "Username:" in output:
             self.send(input("Username: "))
-        if "Password:" in output:
-            self.send(input("Password: "))
+            output = self.read_until_prompt(LOGIN_PROMPT_REGEX)
 
-        self.read_until_prompt()
+        if "Password:" in output:
+            self.send(getpass.getpass("Password: "))
+            self.read_until_prompt()
 
     def send_command(self, cmd):
         self.send(cmd)
@@ -98,10 +105,8 @@ class SerialConnection:
         output = self.send_command(
             "show archive config incremental-diffs nvram:startup-config"
         )
-        #.strip()
 
-        # Empty output means no differences
-        if not output:
-            return True
-
-        return False
+        return not any(
+            line.startswith(("+", "-"))
+            for line in output.splitlines()
+        )
