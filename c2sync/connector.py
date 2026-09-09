@@ -1,113 +1,59 @@
-import time
-import re
 import logging
 
-from serial import Serial
+from netmiko import ConnectHandler
 
 from c2sync import Project
+from c2sync.models import CommandBlock
 
 LOGGER = logging.getLogger(__name__)
 
+
 class SerialInterface:
-    def __init__(self, project: Project) -> None:
-        self.serial = Serial(
-            port=project.SERIAL_DEVICE,
-            baudrate=project.BAUDRATE,
-            timeout=project.TIMEOUT
+    """
+    Console/serial connection to a network device, backed by Netmiko.
+
+    Netmiko's ConnectHandler drives the serial port directly (via its
+    `serial_settings` transport) and handles prompt detection, paging,
+    and AAA login as part of session setup.
+    """
+
+    def __init__(self, project: Project, username: str = None, password: str = None, secret: str = None) -> None:
+        self.conn = ConnectHandler(
+            device_type='cisco_ios',
+            serial_settings={
+                'port': project.SERIAL_DEVICE,
+                'baudrate': project.BAUDRATE,
+            },
+            timeout=project.TIMEOUT,
+            username=username,
+            password=password,
+            secret=secret,
         )
-        self.timeout = project.TIMEOUT
-        self.prompt_regex = project.PROMPT_REGEX
-
-
-    def send_command(self, command: str):
-        if self.serial.writable():
-            LOGGER.debug(f'Sending command {command} to device')
-            message = command + '\n'
-            self.serial.write(message.encode())
-            response = self.read_until_prompt()
-            LOGGER.debug(f'Recieved response: {response}')
-            return response
-
-
-    def read_until_prompt(self, timeout: int=-1):
-        timeout = self.timeout if timeout is -1 else timeout
-        buffer = ''
-        start_time = time.time()
-
-        while True:
-            if self.serial.in_waiting:
-                chunk = self.serial.read(self.serial.in_waiting).decode(errors="ignore")
-                buffer += chunk
-
-                lines = buffer.strip().splitlines()
-                if lines and re.search(self.prompt_regex, lines[-1]):
-                    return buffer
-                    
-            if time.time() - start_time > timeout:
-                return buffer
-
-            time.sleep(0.1)
-
-
-    def login(self, username: str, password: str, timeout: int):
-        timeout = self.timeout if timeout is None else timeout
-        buffer = ''
-        start_time = time.time()
-
-        while True:
-            if self.serial.in_waiting:
-                chunk = self.serial.read(self.serial.in_waiting).decode(errors="ignore")
-                buffer += chunk
-
-                print(chunk, end='')
-
-                if 'Username:' in buffer:
-                    message = username + '\n'
-                    self.serial.write(message.encode())
-                    buffer = ''
-                elif 'Password:' in buffer:
-                    message = password + '\n'
-                    self.serial.write(message.encode())
-                    buffer = ''
-                else:
-                    lines = buffer.strip().splitlines()
-                    if lines and re.search(self.prompt_regex, lines[-1]):
-                        LOGGER.info('Successfully logged in to device')
-                        print('\nLogged in')
-                        return True
-
-            if time.time() - start_time > timeout:
-                raise Exception('Login timedout')
-
-            time.sleep(0.1)
 
 
     def initialize_session(self):
-        self.send_command('enable')
-        self.send_command('terminal length 0')
+        if not self.conn.check_enable_mode():
+            self.conn.enable()
 
 
-    def get_running_config(self):
-        self.send_command('show running-config brief')
-        time.sleep(0.5)
-        return self.read_until_prompt()
+    def get_running_config(self) -> str:
+        return self.conn.send_command('show running-config brief')
 
 
-    def apply_config_blocks(self, blocks: list[list[str]]):
-        print('\nEntering configuration mode...')
-        self.send_command('configure terminal')
-
-        for block in blocks:
-            for line in block:
-                print(f'SENDING: {line}')
-                self.send_command(line)
-
-        self.send_command('end')
+    def apply_config_blocks(self, blocks: list[CommandBlock]) -> str:
+        lines = [line for block in blocks for line in block.to_lines()]
+        LOGGER.debug(f'Sending config lines: {lines}')
+        return self.conn.send_config_set(lines)
 
 
-    def sync_config(self, blocks: list[list[str]]):
+    def sync_config(self, blocks: list[CommandBlock]) -> str:
         self.apply_config_blocks(blocks)
-        
-        new_config = self.get_running_config()
+        return self.get_running_config()
 
-        # TODO: Update edit file
+
+    def save_config(self) -> str:
+        return self.conn.save_config()
+
+
+    def disconnect(self):
+        self.conn.disconnect()
