@@ -81,7 +81,7 @@ relative to cwd — commands must be run from the project directory.
 | `c2sync/git_ops.py` | Thin `git` subprocess wrapper — `init`/`commit`/`commit_empty`/`show_at_head` |
 | `c2sync/user_config.py` | Reads the optional global TOML preferences file — `load()`/`config_path()` |
 | `c2sync/state_engine.py` | `StateEngine` — `host_dirty`/`device_dirty` tracking |
-| `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigSaveError` |
+| `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigSaveError`, `HostKeyRejectedError` |
 | `c2sync/main.py` | CLI entry point: `init` / `pull` / `status` / `sync` / `commit` / `discard` |
 
 ### Diff → CLI command translation (`differ.py`)
@@ -155,6 +155,26 @@ consequence: a device whose host key isn't already trusted there will fail to co
 until the operator trusts it once outside c2sync (e.g. a plain `ssh user@host` or
 `ssh-keyscan`) — correct, expected behavior, not a bug.
 
+**Optional escape hatch:** if the global config's `prompt_for_unknown_ssh_hosts` is
+`True` (default `False`), `DeviceInterface.__init__` catches the specific failure
+Netmiko raises for a genuinely-unknown host — a `NetmikoTimeoutException` containing
+`"not found in known_hosts"`, which is exactly paramiko's `RejectPolicy.
+missing_host_key()`'s own message wrapped by Netmiko's generic `except paramiko.
+ssh_exception.SSHException` handler — and calls `_trust_new_host_key()`. That function
+opens its own `paramiko.Transport` directly (no Netmiko, no authentication - just the
+transport-level handshake) to fetch the server's real key, prints an OpenSSH-style
+`"key fingerprint is SHA256:..."` prompt, and only on an explicit `yes` adds it to
+`~/.ssh/known_hosts` (via `paramiko.HostKeys`) before the original `ConnectHandler`
+call is retried once. A **changed** key never reaches this path at all regardless of
+the setting - paramiko raises `BadHostKeyException` (different exception, different
+message) for that case, straight from its own host-key-checking logic in
+`SSHClient.connect()`, so it always fails hard rather than ever being auto-trusted.
+This is why the setting defaults off: TOFU-with-persistence only protects against an
+attacker who isn't on-path during the *first* connection - for a device being
+onboarded for the first time (a shared lab VLAN, a jump host, a compromised switch),
+that's exactly the moment a human verifying the fingerprint out-of-band actually
+matters.
+
 Two things this wrapper adds on top of raw Netmiko, transport-independent:
 
 - `apply_config()` passes an IOS `error_pattern` to `send_config_set()`, so a rejected
@@ -227,6 +247,10 @@ Recognized keys, all optional:
 - `baudrate` — default for `c2sync init SERIAL_DEVICE [BAUDRATE]`'s optional argument;
   an explicit CLI argument still wins.
 - `ssh_port` — same, but for `c2sync init --ssh HOST [PORT]`'s optional argument.
+- `prompt_for_unknown_ssh_hosts` — **default `False`.** When `True`, an SSH host with no
+  entry in `~/.ssh/known_hosts` gets an OpenSSH-style prompt (fingerprint shown, y/n)
+  instead of failing closed; accepting adds it to `known_hosts` and retries the
+  connection. See Device transport below for why this defaults off.
 - `timeout` / `prompt_regex` — passed through to `Project.TIMEOUT`/`PROMPT_REGEX` at
   `init` time if present, otherwise the `Project` dataclass's own defaults apply.
 

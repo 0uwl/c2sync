@@ -8,3 +8,7 @@ class ConfigApplyError(C2SyncError):
 
 class ConfigSaveError(C2SyncError):
     """Raised when the device did not confirm that running-config was saved to startup-config."""
+
+
+class HostKeyRejectedError(C2SyncError):
+    """Raised when an unknown SSH host key couldn't be verified/trusted (declined, or the check itself failed)."""

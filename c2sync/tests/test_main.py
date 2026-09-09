@@ -99,6 +99,28 @@ def test_connect_uses_username_from_global_config(project, monkeypatch):
     assert StateEngine(project).state.device_dirty is True
 
 
+def test_connect_defaults_prompt_for_unknown_hosts_to_false(project, monkeypatch):
+    monkeypatch.setenv('C2SYNC_USERNAME', 'admin')
+    monkeypatch.setenv('C2SYNC_PASSWORD', 'pw')
+
+    with patch('c2sync.main.user_config.load', return_value={}), \
+         patch('c2sync.main.DeviceInterface') as mock_iface_cls:
+        main_module._connect(project)
+
+    assert mock_iface_cls.call_args.kwargs['prompt_for_unknown_hosts'] is False
+
+
+def test_connect_reads_prompt_for_unknown_hosts_from_global_config(project, monkeypatch):
+    monkeypatch.setenv('C2SYNC_USERNAME', 'admin')
+    monkeypatch.setenv('C2SYNC_PASSWORD', 'pw')
+
+    with patch('c2sync.main.user_config.load', return_value={'prompt_for_unknown_ssh_hosts': True}), \
+         patch('c2sync.main.DeviceInterface') as mock_iface_cls:
+        main_module._connect(project)
+
+    assert mock_iface_cls.call_args.kwargs['prompt_for_unknown_hosts'] is True
+
+
 # ------------------------------------------------------------------
 # init / global config
 # ------------------------------------------------------------------

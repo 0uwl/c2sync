@@ -2,11 +2,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from netmiko.exceptions import ConfigInvalidException
+from netmiko.exceptions import ConfigInvalidException, NetmikoTimeoutException
 
 from c2sync import Project
 from c2sync.connector import DeviceInterface
-from c2sync.exceptions import ConfigApplyError, ConfigSaveError
+from c2sync.exceptions import ConfigApplyError, ConfigSaveError, HostKeyRejectedError
 
 from constants import PROJECT
 
@@ -58,6 +58,105 @@ def test_ssh_project_verifies_host_keys_instead_of_trusting_any():
     kwargs = mock_handler.call_args.kwargs
     assert kwargs['ssh_strict'] is True
     assert kwargs['system_host_keys'] is True
+
+
+# ------------------------------------------------------------------
+# unknown SSH host key handling
+# ------------------------------------------------------------------
+
+UNKNOWN_HOST_ERROR = NetmikoTimeoutException(
+    "\nA paramiko SSHException occurred during connection creation:\n\n"
+    "Server '10.0.0.1' not found in known_hosts\n\n"
+)
+
+
+def test_unknown_host_key_not_prompted_by_default():
+    """
+    prompt_for_unknown_hosts defaults to False - an unknown host key must
+    fail closed (today's behavior), never silently trigger a prompt.
+    """
+    ssh_project = Project(TRANSPORT='ssh', HOST='10.0.0.1')
+
+    with patch('c2sync.connector.ConnectHandler', side_effect=UNKNOWN_HOST_ERROR), \
+         patch('c2sync.connector._trust_new_host_key') as mock_trust:
+        with pytest.raises(NetmikoTimeoutException):
+            DeviceInterface(ssh_project, username='admin', password='pw')
+
+    mock_trust.assert_not_called()
+
+
+def test_unknown_host_key_prompts_and_retries_when_enabled():
+    ssh_project = Project(TRANSPORT='ssh', HOST='10.0.0.1')
+    mock_conn = MagicMock()
+
+    with patch('c2sync.connector.ConnectHandler', side_effect=[UNKNOWN_HOST_ERROR, mock_conn]) as mock_handler, \
+         patch('c2sync.connector._trust_new_host_key') as mock_trust:
+        interface = DeviceInterface(ssh_project, username='admin', password='pw', prompt_for_unknown_hosts=True)
+
+    mock_trust.assert_called_once_with('10.0.0.1', 22)
+    assert mock_handler.call_count == 2
+    assert interface.conn is mock_conn
+
+
+def test_unrelated_connection_failure_does_not_trigger_the_prompt():
+    """
+    Only RejectPolicy's specific "not found in known_hosts" message should
+    ever trigger the trust flow - a different failure (bad password, TCP
+    timeout, etc.) must not be misread as an unknown-host-key situation.
+    """
+    ssh_project = Project(TRANSPORT='ssh', HOST='10.0.0.1')
+    other_error = NetmikoTimeoutException('TCP connection to device failed.')
+
+    with patch('c2sync.connector.ConnectHandler', side_effect=other_error), \
+         patch('c2sync.connector._trust_new_host_key') as mock_trust:
+        with pytest.raises(NetmikoTimeoutException):
+            DeviceInterface(ssh_project, username='admin', password='pw', prompt_for_unknown_hosts=True)
+
+    mock_trust.assert_not_called()
+
+
+def test_declining_the_host_key_prompt_raises_and_saves_nothing(tmp_path, monkeypatch):
+    from c2sync.connector import _trust_new_host_key
+
+    known_hosts = tmp_path / 'known_hosts'
+    monkeypatch.setattr('c2sync.connector.KNOWN_HOSTS_PATH', str(known_hosts))
+
+    fake_key = MagicMock()
+    fake_key.get_name.return_value = 'ssh-ed25519'
+    fake_key.asbytes.return_value = b'fake-key-bytes'
+
+    mock_transport = MagicMock()
+    mock_transport.get_remote_server_key.return_value = fake_key
+
+    with patch('c2sync.connector.socket.create_connection'), \
+         patch('c2sync.connector.paramiko.Transport', return_value=mock_transport), \
+         patch('builtins.input', return_value='no'):
+        with pytest.raises(HostKeyRejectedError):
+            _trust_new_host_key('10.0.0.1', 22)
+
+    assert not known_hosts.exists()
+
+
+def test_accepting_the_host_key_prompt_saves_it_to_known_hosts(tmp_path, monkeypatch):
+    from c2sync.connector import _trust_new_host_key
+
+    known_hosts = tmp_path / 'known_hosts'
+    monkeypatch.setattr('c2sync.connector.KNOWN_HOSTS_PATH', str(known_hosts))
+
+    fake_key = MagicMock()
+    fake_key.get_name.return_value = 'ssh-ed25519'
+    fake_key.asbytes.return_value = b'fake-key-bytes'
+
+    mock_transport = MagicMock()
+    mock_transport.get_remote_server_key.return_value = fake_key
+
+    with patch('c2sync.connector.socket.create_connection'), \
+         patch('c2sync.connector.paramiko.Transport', return_value=mock_transport), \
+         patch('builtins.input', return_value='yes'):
+        _trust_new_host_key('10.0.0.1', 22)
+
+    assert known_hosts.exists()
+    assert '10.0.0.1' in known_hosts.read_text()
 
 
 def test_apply_config_returns_output_on_success():
