@@ -1,10 +1,11 @@
 import getpass
 import logging
+import os
 import sys
 
 from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutException
 
-from c2sync import Project, get_project, init_project
+from c2sync import Project, get_project, git_ops, init_project, user_config
 from c2sync.connector import SerialInterface
 from c2sync.differ import Differ
 from c2sync.exceptions import ConfigApplyError, ConfigSaveError
@@ -18,6 +19,7 @@ c2sync COMMAND
 
 Commands:
     init         Start a C2Sync session in the current working directory
+    pull         Fetch the device's running config and make it the new baseline
     status       Show whether the local config file has unsynced edits
     sync         Preview changes and confirm or abort them
     commit       Issues the command to save the running config to the startup config on the device
@@ -36,6 +38,8 @@ def main():
     match command:
         case 'init':
             init(command_arguments)
+        case 'pull':
+            pull(command_arguments)
         case 'status':
             status(command_arguments)
         case 'sync':
@@ -56,10 +60,53 @@ def init(arguments: list):
         print('Usage: c2sync init SERIAL_DEVICE [BAUDRATE]')
         sys.exit(1)
 
-    serial_device = arguments[0]
-    baudrate = int(arguments[1]) if len(arguments) > 1 else 9600
+    config = user_config.load()
 
-    init_project(Project(SERIAL_DEVICE=serial_device, BAUDRATE=baudrate))
+    serial_device = arguments[0]
+    baudrate = int(arguments[1]) if len(arguments) > 1 else config.get('baudrate', 9600)
+
+    project_kwargs = {'SERIAL_DEVICE': serial_device, 'BAUDRATE': baudrate}
+    if 'timeout' in config:
+        project_kwargs['TIMEOUT'] = config['timeout']
+    if 'prompt_regex' in config:
+        project_kwargs['PROMPT_REGEX'] = config['prompt_regex']
+
+    init_project(Project(**project_kwargs))
+
+
+def pull(arguments: list):
+    """
+    Fetch the device's actual running config and commit it as the new
+    baseline - this is how an already-configured device gets onboarded
+    (init alone only creates an empty device.config), and how the local
+    baseline can be resynced if the device changed out-of-band.
+    """
+    LOGGER.debug(f'Given arguments: {arguments}')
+    force = '-y' in arguments
+
+    project = _require_project()
+
+    state = StateEngine(project).state
+    if state.host_dirty and not force:
+        print('You have unsynced local edits that would be overwritten. Run '
+              '`c2sync discard` first, or `c2sync pull -y` to overwrite them anyway.')
+        sys.exit(1)
+
+    interface = _connect(project)
+    try:
+        new_config = interface.get_running_config()
+    finally:
+        interface.disconnect()
+
+    with open(project.EDIT_FILE, 'w') as file:
+        file.write(new_config)
+
+    edit_file_name = os.path.relpath(project.EDIT_FILE, project.PROJECT_DIR)
+    git_ops.commit(project.PROJECT_DIR, [edit_file_name], f'c2sync pull: fetched from {project.SERIAL_DEVICE}')
+
+    Differ(project).clear_staging()
+    StateEngine(project).mark_host_clean()
+    print('Pulled running config from device.')
 
 
 def status(arguments: list):
@@ -116,14 +163,15 @@ def sync(arguments: list):
     state_engine.mark_host_clean()
     state_engine.mark_device_dirty()
 
-    # The device is now the source of truth again - refresh both the file
-    # the user edits and the baseline we diff it against next time, exactly
-    # the way `git commit` advances what HEAD (and the index) point to.
+    # The device is now the source of truth again - refresh the file the
+    # user edits and commit it, so git HEAD (the baseline we diff against
+    # next time) advances the way a `git commit` advances the index.
     new_config = interface.get_running_config()
     with open(project.EDIT_FILE, 'w') as file:
         file.write(new_config)
-    with open(project.BASELINE_FILE, 'w') as file:
-        file.write(new_config)
+
+    edit_file_name = os.path.relpath(project.EDIT_FILE, project.PROJECT_DIR)
+    git_ops.commit(project.PROJECT_DIR, [edit_file_name], f'c2sync sync: pushed to {project.SERIAL_DEVICE}')
 
     interface.disconnect()
     print('\nSynced. Device has pending changes not yet saved to startup-config (run `c2sync commit`).')
@@ -159,6 +207,7 @@ def commit(arguments: list):
         sys.exit(1)
 
     state_engine.mark_device_clean()
+    git_ops.commit_empty(project.PROJECT_DIR, f'c2sync commit: saved to startup-config on {project.SERIAL_DEVICE}')
     interface.disconnect()
     print('\nSaved. Device is now synced.')
 
@@ -171,8 +220,8 @@ def discard(arguments: list):
     # Revert the edit file itself, not just the staging file - otherwise
     # the discarded edits would just get re-staged the next time status/sync
     # recomputes the diff against the baseline.
-    with open(project.BASELINE_FILE) as file:
-        baseline = file.read()
+    edit_file_name = os.path.relpath(project.EDIT_FILE, project.PROJECT_DIR)
+    baseline = git_ops.show_at_head(project.PROJECT_DIR, edit_file_name) or ''
     with open(project.EDIT_FILE, 'w') as file:
         file.write(baseline)
 
@@ -211,9 +260,23 @@ def _confirm(prompt: str) -> bool:
 
 
 def _connect(project: Project) -> SerialInterface:
-    username = input('Username: ')
-    password = getpass.getpass('Password: ')
-    secret = getpass.getpass('Enable secret (leave blank if none): ') or None
+    # Username is not a secret, so it can also come from the user's global
+    # config (~/.config/c2sync/config.toml) - password/secret never do, only
+    # the env vars below or an interactive prompt.
+    config = user_config.load()
+    username = os.environ.get('C2SYNC_USERNAME') or config.get('username')
+    password = os.environ.get('C2SYNC_PASSWORD')
+
+    # CI/non-interactive path: only skip prompting if both are already
+    # resolved, so a partially-set environment falls back to fully
+    # interactive rather than half-prompting (and potentially hanging on
+    # stdin in CI).
+    if username is not None and password is not None:
+        secret = os.environ.get('C2SYNC_SECRET') or None
+    else:
+        username = username or input('Username: ')
+        password = password or getpass.getpass('Password: ')
+        secret = getpass.getpass('Enable secret (leave blank if none): ') or None
 
     try:
         interface = SerialInterface(project, username=username, password=password, secret=secret)

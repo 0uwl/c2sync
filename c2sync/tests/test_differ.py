@@ -216,23 +216,25 @@ def test_refresh_staging_overwrites_rather_than_appends(differ):
 # ------------------------------------------------------------------
 
 def test_refresh_staging_from_files_reads_baseline_and_edit_file(tmp_path):
-    from c2sync import Project
+    from c2sync import Project, git_ops
 
     project_dir = tmp_path / '.c2sync'
     project_dir.mkdir()
 
-    baseline_file = project_dir / 'baseline.config'
     edit_file = project_dir / 'device.config'
     staging_file = project_dir / 'staging.txt'
 
-    baseline_file.write_text("interface Gi1/0/1\n")
-    edit_file.write_text("interface Gi1/0/1\n shutdown\n")
+    edit_file.write_text("interface Gi1/0/1\n")
     staging_file.write_text("")
+
+    git_ops.init(str(project_dir))
+    git_ops.commit(str(project_dir), ['device.config'], 'baseline')
+
+    edit_file.write_text("interface Gi1/0/1\n shutdown\n")
 
     project = Project(
         SERIAL_DEVICE='NOT USED',
         PROJECT_DIR=str(project_dir),
-        BASELINE_FILE=str(baseline_file),
         EDIT_FILE=str(edit_file),
         STAGING_FILE=str(staging_file),
     )

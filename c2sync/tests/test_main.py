@@ -12,6 +12,9 @@ from c2sync.state_engine import StateEngine
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    # Isolate from whatever global config.toml might actually exist on the
+    # machine running the tests.
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
     main_module.init(['/dev/ttyUSB0'])
     return get_project()
 
@@ -27,6 +30,148 @@ def _mocked_connect(mock_conn):
         patch('builtins.input', side_effect=['admin']),
         patch('getpass.getpass', side_effect=['pw', '']),
     )
+
+
+# ------------------------------------------------------------------
+# credentials
+# ------------------------------------------------------------------
+
+def test_connect_uses_env_credentials_without_prompting(project, monkeypatch):
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
+
+    monkeypatch.setenv('C2SYNC_USERNAME', 'admin')
+    monkeypatch.setenv('C2SYNC_PASSWORD', 'pw')
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_config_set.return_value = 'interface Gi1/0/1\n shutdown\nend'
+    mock_conn.send_command.return_value = 'interface Gi1/0/1\n shutdown\n!'
+
+    def _fail_if_prompted(*args, **kwargs):
+        raise AssertionError('should not prompt when both env vars are set')
+
+    with patch('c2sync.connector.ConnectHandler', return_value=mock_conn), \
+         patch('builtins.input', side_effect=_fail_if_prompted), \
+         patch('getpass.getpass', side_effect=_fail_if_prompted):
+        main_module.sync(['-y'])
+
+    assert StateEngine(project).state.device_dirty is True
+
+
+def test_connect_falls_back_to_prompt_when_env_partially_set(project, monkeypatch):
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
+
+    monkeypatch.setenv('C2SYNC_USERNAME', 'admin')
+    monkeypatch.delenv('C2SYNC_PASSWORD', raising=False)
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_config_set.return_value = 'interface Gi1/0/1\n shutdown\nend'
+    mock_conn.send_command.return_value = 'interface Gi1/0/1\n shutdown\n!'
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.sync(['-y'])
+
+    assert StateEngine(project).state.device_dirty is True
+
+
+def test_connect_uses_username_from_global_config(project, monkeypatch):
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
+
+    monkeypatch.delenv('C2SYNC_USERNAME', raising=False)
+    monkeypatch.delenv('C2SYNC_PASSWORD', raising=False)
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_config_set.return_value = 'interface Gi1/0/1\n shutdown\nend'
+    mock_conn.send_command.return_value = 'interface Gi1/0/1\n shutdown\n!'
+
+    def _fail_if_prompted(*args, **kwargs):
+        raise AssertionError('should not prompt for username when set in global config')
+
+    with patch('c2sync.connector.ConnectHandler', return_value=mock_conn), \
+         patch('c2sync.main.user_config.load', return_value={'username': 'admin'}), \
+         patch('builtins.input', side_effect=_fail_if_prompted), \
+         patch('getpass.getpass', side_effect=['pw', '']):
+        main_module.sync(['-y'])
+
+    assert StateEngine(project).state.device_dirty is True
+
+
+# ------------------------------------------------------------------
+# init / global config
+# ------------------------------------------------------------------
+
+def test_init_uses_baudrate_from_global_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    with patch('c2sync.main.user_config.load', return_value={'baudrate': 115200}):
+        main_module.init(['/dev/ttyUSB0'])
+
+    assert get_project().BAUDRATE == 115200
+
+
+def test_init_cli_baudrate_overrides_global_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    with patch('c2sync.main.user_config.load', return_value={'baudrate': 115200}):
+        main_module.init(['/dev/ttyUSB0', '57600'])
+
+    assert get_project().BAUDRATE == 57600
+
+
+# ------------------------------------------------------------------
+# pull
+# ------------------------------------------------------------------
+
+def test_pull_fetches_and_commits_running_config(project):
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_command.return_value = 'hostname Router1\ninterface Gi1/0/1\n'
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.pull([])
+
+    with open(project.EDIT_FILE) as file:
+        assert file.read() == 'hostname Router1\ninterface Gi1/0/1\n'
+
+    assert StateEngine(project).state.host_dirty is False
+
+    # The pulled config is now the git baseline - status shouldn't restage it.
+    main_module.status([])
+    with open(project.STAGING_FILE) as file:
+        assert file.read() == ''
+
+
+def test_pull_refuses_when_host_dirty_without_force(project):
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
+    main_module.status([])
+    assert StateEngine(project).state.host_dirty is True
+
+    with patch('c2sync.connector.ConnectHandler') as mock_handler:
+        with pytest.raises(SystemExit):
+            main_module.pull([])
+        mock_handler.assert_not_called()
+
+
+def test_pull_overwrites_host_dirty_edits_with_force(project):
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
+    main_module.status([])
+    assert StateEngine(project).state.host_dirty is True
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_command.return_value = 'hostname Router1\n'
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.pull(['-y'])
+
+    with open(project.EDIT_FILE) as file:
+        assert file.read() == 'hostname Router1\n'
+    assert StateEngine(project).state.host_dirty is False
 
 
 # ------------------------------------------------------------------
@@ -155,7 +300,7 @@ def test_commit_saves_and_marks_device_clean(project):
 # ------------------------------------------------------------------
 
 def test_discard_reverts_edit_file_to_baseline(project):
-    with open(project.BASELINE_FILE) as file:
+    with open(project.EDIT_FILE) as file:
         baseline = file.read()
 
     _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])

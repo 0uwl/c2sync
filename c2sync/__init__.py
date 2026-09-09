@@ -4,11 +4,12 @@ import logging
 
 from dataclasses import dataclass
 
+from c2sync import git_ops
+
 LOGGER = logging.getLogger(__name__)
 
 APP_CONFIG_NAME = 'c2sync.config'
 DEVICE_CONFIG_NAME = 'device.config'
-BASELINE_CONFIG_NAME = 'baseline.config'
 STAGING_FILE_NAME = 'staging.txt'
 STATE_FILE_NAME = 'state.json'
 PROJECT_ROOT = './.c2sync'
@@ -20,11 +21,10 @@ class Project:
     TIMEOUT: int = 600
     PROJECT_DIR: str = PROJECT_ROOT
     CONFIG_FILE: str = os.path.join(PROJECT_DIR, APP_CONFIG_NAME)
+    # The "baseline" (config as of the last confirmed sync) is no longer a
+    # separate file - it's whatever EDIT_FILE looks like at git HEAD in
+    # PROJECT_DIR, the same way `git status` diffs against the index.
     EDIT_FILE: str = os.path.join(PROJECT_DIR, DEVICE_CONFIG_NAME)
-    # Snapshot of the config as it looked the last time it was known to
-    # match the device (right after init or a confirmed sync). Diffing the
-    # live EDIT_FILE against this on demand is what replaces the watcher.
-    BASELINE_FILE: str = os.path.join(PROJECT_DIR, BASELINE_CONFIG_NAME)
     PROMPT_REGEX: str = r'[>#]\s?$'
     STAGING_FILE: str = os.path.join(PROJECT_DIR, STAGING_FILE_NAME)
     STATE_FILE: str = os.path.join(PROJECT_DIR, STATE_FILE_NAME)
@@ -36,7 +36,6 @@ class Project:
         'TIMEOUT': self.TIMEOUT,
         'PROJECT_DIR': self.PROJECT_DIR,
         'EDIT_FILE': self.EDIT_FILE,
-        'BASELINE_FILE': self.BASELINE_FILE,
         'PROMPT_REGEX': self.PROMPT_REGEX,
         'STAGING_FILE': self.STAGING_FILE,
         'STATE_FILE': self.STATE_FILE
@@ -54,11 +53,19 @@ def init_project(project_config: Project):
         json.dump(config_dict, config_file)
 
     open(project_config.EDIT_FILE, 'w').close()
-    open(project_config.BASELINE_FILE, 'w').close()
     open(project_config.STAGING_FILE, 'w').close()
 
     with open(project_config.STATE_FILE, 'w') as state_file:
         json.dump({'host_dirty': False, 'device_dirty': False}, state_file)
+
+    # Only the device config itself is worth tracking/reviewing in git -
+    # c2sync.config/state.json/staging.txt are local operational scratch.
+    gitignore_path = os.path.join(project_config.PROJECT_DIR, '.gitignore')
+    with open(gitignore_path, 'w') as gitignore:
+        gitignore.write('\n'.join([APP_CONFIG_NAME, STATE_FILE_NAME, STAGING_FILE_NAME]) + '\n')
+
+    git_ops.init(project_config.PROJECT_DIR)
+    git_ops.commit(project_config.PROJECT_DIR, [DEVICE_CONFIG_NAME, '.gitignore'], 'c2sync init: empty baseline')
 
     LOGGER.info(f'Created project')
     print('C2Sync project initialized')

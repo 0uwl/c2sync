@@ -6,7 +6,7 @@ authors = [
   { name="0uwl", email="ouwl.person@proton.me" }
 ]
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 
 dependencies = [
   "netmiko",
