@@ -20,26 +20,30 @@ IOS_ERROR_PATTERN = r'%\s*(?:Invalid input|Incomplete command|Ambiguous command|
 IOS_SAVE_SUCCESS_PATTERN = r'\[OK\]'
 
 
-class SerialInterface:
+class DeviceInterface:
     """
-    Console/serial connection to a network device, backed by Netmiko.
+    Connection to a network device, backed by Netmiko - console/serial or
+    SSH depending on project.TRANSPORT.
 
-    Netmiko's ConnectHandler drives the serial port directly (via its
-    `serial_settings` transport) and handles prompt detection, paging,
-    and AAA login as part of session setup.
+    Netmiko's ConnectHandler drives the actual transport (serial or SSH)
+    and handles prompt detection, paging, and AAA login as part of session
+    setup either way; the only thing that differs between transports is
+    which kwargs ConnectHandler needs.
     """
 
     def __init__(self, project: Project, username: str = None, password: str = None, secret: str = None) -> None:
+        if project.TRANSPORT == 'ssh':
+            transport_kwargs = {'host': project.HOST, 'port': project.SSH_PORT}
+        else:
+            transport_kwargs = {'serial_settings': {'port': project.SERIAL_DEVICE, 'baudrate': project.BAUDRATE}}
+
         self.conn = ConnectHandler(
             device_type='cisco_ios',
-            serial_settings={
-                'port': project.SERIAL_DEVICE,
-                'baudrate': project.BAUDRATE,
-            },
             timeout=project.TIMEOUT,
             username=username,
             password=password,
             secret=secret,
+            **transport_kwargs,
         )
 
 

@@ -16,8 +16,14 @@ PROJECT_ROOT = './.c2sync'
 
 @dataclass
 class Project:
-    SERIAL_DEVICE: str
+    # TRANSPORT picks which of the fields below matter: 'serial' uses
+    # SERIAL_DEVICE/BAUDRATE, 'ssh' uses HOST/SSH_PORT. Both sets of fields
+    # always exist on Project so serialization stays a flat dict either way.
+    TRANSPORT: str = 'serial'
+    SERIAL_DEVICE: str = None
     BAUDRATE: int = 9600
+    HOST: str = None
+    SSH_PORT: int = 22
     TIMEOUT: int = 600
     PROJECT_DIR: str = PROJECT_ROOT
     CONFIG_FILE: str = os.path.join(PROJECT_DIR, APP_CONFIG_NAME)
@@ -29,10 +35,23 @@ class Project:
     STAGING_FILE: str = os.path.join(PROJECT_DIR, STAGING_FILE_NAME)
     STATE_FILE: str = os.path.join(PROJECT_DIR, STATE_FILE_NAME)
 
+    @property
+    def target(self) -> str:
+        """
+        The single human-readable identifier for whichever device this
+        project points at - a serial path or a hostname/IP - used in git
+        commit messages and the like so callers don't need to branch on
+        TRANSPORT themselves.
+        """
+        return self.HOST if self.TRANSPORT == 'ssh' else self.SERIAL_DEVICE
+
     def to_dict(self):
         return {
+        'TRANSPORT': self.TRANSPORT,
         'SERIAL_DEVICE': self.SERIAL_DEVICE,
         'BAUDRATE': self.BAUDRATE,
+        'HOST': self.HOST,
+        'SSH_PORT': self.SSH_PORT,
         'TIMEOUT': self.TIMEOUT,
         'PROJECT_DIR': self.PROJECT_DIR,
         'EDIT_FILE': self.EDIT_FILE,
@@ -94,8 +113,3 @@ def _load_configuration() -> dict:
     LOGGER.info(f'Loaded configuration: {config_dict}')
 
     return config_dict
-
-
-def get_serial_device():
-    # TODO: Get arguments
-    return '/dev/ttyUSB0'

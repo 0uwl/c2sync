@@ -2,22 +2,22 @@
 
 ## Overview
 
-C2Sync is a Python-based CLI tool that acts as a **middleman between a Cisco IOS device (over console/serial) and a local git repository**.
+C2Sync is a Python-based CLI tool that acts as a **middleman between a Cisco IOS device (over serial console or SSH) and a local git repository**.
 
 The tool lets you:
 
 * Track a device's running configuration in a local git repository
 * Edit the configuration locally using the text editor of your choice (e.g. VS Code)
 * Diff your edits against a real Cisco IOS configuration tree, including deletions, not just added lines
-* Push changes back to the device over the serial connection, verified against the device's own response before anything is considered synced
+* Push changes back to the device over serial or SSH, verified against the device's own response before anything is considered synced
 * Save the running configuration to the startup configuration
 
-Console-only, Cisco IOS only, one device per project — a deliberate starting scope, not an oversight. SSH transport and multi-vendor support are designed-for future extensions, not current scope.
+Cisco IOS only, one device per project — a deliberate starting scope, not an oversight. Multi-vendor support is a possible future direction, not current scope (see Potential Future Features below).
 
 ## Core Design Principles
 
 * Focus on simplicity, reliability, and CLI correctness
-* Simplify the experience of managing device config over a console connection
+* Simplify the experience of managing device config over serial or SSH
 * Every project is a real git repository — c2sync commits at defined lifecycle points (confirmed sync/commit), but doesn't reimplement `diff`/`log`/`branch`/PR review. Use your normal git tooling directly against the project directory, and push it to GitHub/GitLab for review like any other repo
 * Users should already be comfortable with Cisco IOS CLI syntax
 
@@ -38,7 +38,7 @@ Not published to PyPI yet — install from a checkout of this repository:
 pip install -e .
 ```
 
-Requires Python 3.11+ (for reading the optional global config file, see Configuration below) and a real or mocked serial connection for anything beyond `init`/`status`/`discard` — `pull`/`sync`/`commit` all need to reach the device.
+Requires Python 3.11+ (for reading the optional global config file, see Configuration below) and a real or mocked device connection for anything beyond `init`/`status`/`discard` — `pull`/`sync`/`commit` all need to reach the device, over serial or SSH.
 
 ## Usage
 ### CLI Commands
@@ -46,7 +46,8 @@ Requires Python 3.11+ (for reading the optional global config file, see Configur
 c2sync COMMAND
 
 Commands:
-  init      SERIAL_DEVICE [BAUDRATE]  Start a project for one device in the current directory
+  init      SERIAL_DEVICE [BAUDRATE]  Start a project for one device over serial
+  init      --ssh HOST [PORT]         Start a project for one device over SSH
   pull      [-y]                      Fetch the device's running config and make it the new baseline
   status                              Show whether there are unsynced local edits or an unsaved device change
   sync      [-y]                      Preview and push staged changes to the device
@@ -60,11 +61,13 @@ Commands:
 
 ```
 c2sync init SERIAL_DEVICE [BAUDRATE]
+c2sync init --ssh HOST [PORT]
 ```
 Behavior:
-* Creates a new project in the current working directory (`./.c2sync/`)
+* Creates a new project in the current working directory (`./.c2sync/`) for one device, reached over serial or SSH
 * Initializes a git repository there and makes the first commit (an empty `device.config`)
-* `BAUDRATE` defaults to 9600, or to the global config's `baudrate` if set (see Configuration below)
+* Serial: `BAUDRATE` defaults to 9600, or to the global config's `baudrate` if set (see Configuration below)
+* SSH: `PORT` defaults to 22, or to the global config's `ssh_port` if set
 
 ### 2. Pull
 
@@ -166,6 +169,7 @@ An optional TOML file at `~/.config/c2sync/config.toml` (or `$XDG_CONFIG_HOME/c2
 ```toml
 username = "admin"
 baudrate = 115200
+ssh_port = 22
 timeout = 600
 prompt_regex = '[>#]\s?$'
 ```

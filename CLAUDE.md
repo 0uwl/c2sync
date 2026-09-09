@@ -4,11 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What C2Sync is
 
-A CLI tool that acts as a middleman between a Cisco IOS device (over console/serial)
-and a local git repository: pull the running-config to a local text file, edit it in a
-normal text editor, and push the diff back as CLI commands. Console-only is a
-**deliberate** starting scope (see Roadmap below), not an oversight — SSH is a
-designed-for future extension, not current work.
+A CLI tool that acts as a middleman between a Cisco IOS device (over console/serial or
+SSH) and a local git repository: pull the running-config to a local text file, edit it
+in a normal text editor, and push the diff back as CLI commands. Cisco IOS only is a
+**deliberate** starting scope (see Roadmap below), not an oversight — other vendors are
+a documented possible future direction (see `README.md`'s "Potential Future Features"),
+not current work.
 
 There is no lint/format tooling configured in this repo (no ruff/black/flake8 config)
 — don't invent one.
@@ -28,9 +29,10 @@ pytest c2sync/tests -q
 pytest c2sync/tests/test_differ.py -q
 pytest c2sync/tests/test_differ.py::test_refresh_staging_stages_additions_with_context -q
 
-# Run the CLI locally (after install; requires a real or mocked serial device for
+# Run the CLI locally (after install; requires a real or mocked device connection for
 # anything beyond `init`/`status`/`discard`)
-c2sync init /dev/ttyUSB0 [BAUDRATE]
+c2sync init /dev/ttyUSB0 [BAUDRATE]     # serial transport
+c2sync init --ssh HOST [PORT]           # SSH transport
 c2sync pull [-y]
 c2sync status
 c2sync sync [-y]
@@ -38,8 +40,8 @@ c2sync commit [-y]
 c2sync discard
 ```
 
-All tests are mocked at the Netmiko/`ConnectHandler` boundary — no real hardware or
-serial port is needed to run the suite. `c2sync/tests/` has no `__init__.py`; pytest's
+All tests are mocked at the Netmiko/`ConnectHandler` boundary — no real hardware,
+serial port, or network connection is needed to run the suite. `c2sync/tests/` has no `__init__.py`; pytest's
 default rootdir insertion is what makes `from constants import PROJECT` work in test
 files, not a package import.
 
@@ -47,9 +49,9 @@ files, not a package import.
 
 ### Project directory model
 
-`c2sync init SERIAL_DEVICE [BAUDRATE]` creates `./.c2sync/` holding the entire state
-for **one device** — there is currently no multi-device registry (see the explicit
-non-goal in `HANDOFF.md`):
+`c2sync init SERIAL_DEVICE [BAUDRATE]` (serial) or `c2sync init --ssh HOST [PORT]`
+(SSH) creates `./.c2sync/` holding the entire state for **one device** — there is
+currently no multi-device registry (see the explicit non-goal in `HANDOFF.md`):
 
 - `device.config` (`EDIT_FILE`) — what the user edits in their text editor. Tracked in
   a real git repo (`git init` inside `PROJECT_DIR` at `init` time) — the baseline is no
@@ -58,8 +60,8 @@ non-goal in `HANDOFF.md`):
 - `staging.txt` (`STAGING_FILE`) — the recomputed CLI commands to push, fully
   overwritten (not appended) on every check.
 - `state.json` (`STATE_FILE`) — `{host_dirty, device_dirty}`, see State tracking below.
-- `c2sync.config` (`CONFIG_FILE`) — the serialized `Project` dataclass (serial device
-  path, baudrate, timeout, all the above paths).
+- `c2sync.config` (`CONFIG_FILE`) — the serialized `Project` dataclass (transport,
+  serial device path/baudrate or SSH host/port, timeout, all the above paths).
 
 `staging.txt`, `state.json`, and `c2sync.config` are local operational scratch, not
 device config to review — `init` writes a `.gitignore` in `PROJECT_DIR` excluding all
@@ -74,7 +76,7 @@ relative to cwd — commands must be run from the project directory.
 | Module | Responsibility |
 |---|---|
 | `c2sync/__init__.py` | `Project` dataclass, `init_project`/`get_project` |
-| `c2sync/connector.py` | `SerialInterface` — Netmiko `ConnectHandler` wrapper (serial transport only) |
+| `c2sync/connector.py` | `DeviceInterface` — Netmiko `ConnectHandler` wrapper (serial or SSH) |
 | `c2sync/differ.py` | `Differ` — real config-tree diff (`ciscoconfparse2`) → CLI commands |
 | `c2sync/git_ops.py` | Thin `git` subprocess wrapper — `init`/`commit`/`commit_empty`/`show_at_head` |
 | `c2sync/user_config.py` | Reads the optional global TOML preferences file — `load()`/`config_path()` |
@@ -133,10 +135,15 @@ or save), never assumed on send — see next section.
 
 ### Device transport (`connector.py`)
 
-`SerialInterface` wraps Netmiko's `ConnectHandler(device_type='cisco_ios',
-serial_settings={...})` — Netmiko drives the actual pyserial transport, handles prompt
-detection, paging, and AAA login during session setup. Two things this wrapper adds on
-top of raw Netmiko:
+`DeviceInterface` wraps Netmiko's `ConnectHandler(device_type='cisco_ios', ...)` for
+both transports — `serial_settings={port, baudrate}` when `project.TRANSPORT ==
+'serial'`, `host=..., port=...` (SSH_PORT, default 22) when `'ssh'`. That branch is the
+entire transport difference; everything past connection setup (prompt detection,
+paging, AAA login, `apply_config`/`save_config`) is identical either way since it's all
+still Netmiko talking to the same `device_type='cisco_ios'` driver. `Project.target`
+(`c2sync/__init__.py`) returns whichever of `SERIAL_DEVICE`/`HOST` is relevant, so
+callers (`main.py`'s git commit messages) don't need to branch on `TRANSPORT`
+themselves. Two things this wrapper adds on top of raw Netmiko, transport-independent:
 
 - `apply_config()` passes an IOS `error_pattern` to `send_config_set()`, so a rejected
   command raises `ConfigApplyError` instead of being silently pushed with the rest of
@@ -205,8 +212,9 @@ the path fresh on each call (not a module-level constant) specifically so tests 
 
 Recognized keys, all optional:
 - `username` — read by `_connect()` (see CLI surface above); never the password/secret.
-- `baudrate` — default for `c2sync init`'s optional `BAUDRATE` argument; an explicit
-  CLI argument still wins.
+- `baudrate` — default for `c2sync init SERIAL_DEVICE [BAUDRATE]`'s optional argument;
+  an explicit CLI argument still wins.
+- `ssh_port` — same, but for `c2sync init --ssh HOST [PORT]`'s optional argument.
 - `timeout` / `prompt_regex` — passed through to `Project.TIMEOUT`/`PROMPT_REGEX` at
   `init` time if present, otherwise the `Project` dataclass's own defaults apply.
 
@@ -253,11 +261,16 @@ See `HANDOFF.md` for the full write-up. Priority order, user-approved:
    (`Addition`/`Command`/`CommandBlock`) was deleted entirely rather than kept
    half-used: `ciscoconfparse2.Diff.get_diff()` already returns ready-to-write CLI
    lines, so there was nothing left for that layer to do.
-3. **SSH as a second transport — designed for, not built yet.** Since `connector.py`
-   already goes through Netmiko, SSH is close to swapping `serial_settings={...}` for
-   `host=...` on the same `device_type`. Keep `differ.py`/`state_engine.py`/`main.py`
-   transport-agnostic (they already operate on `Project` and CLI text, not on
-   `SerialInterface` internals) so this stays cheap when it's actually prioritized.
+3. **SSH as a second transport — done.** `connector.py`'s `SerialInterface` is renamed
+   `DeviceInterface` and branches on `project.TRANSPORT` (`'serial'`/`'ssh'`) to build
+   Netmiko's `serial_settings={...}` or `host=..., port=...` kwargs — everything else in
+   `DeviceInterface` was already transport-independent. `Project` gained `TRANSPORT`,
+   `HOST`, `SSH_PORT` (`SERIAL_DEVICE`/`BAUDRATE` now only apply when `TRANSPORT ==
+   'serial'`) and a `.target` property so callers don't branch on transport themselves.
+   `c2sync init --ssh HOST [PORT]` is the new CLI entry point alongside the existing
+   `c2sync init SERIAL_DEVICE [BAUDRATE]`. `differ.py`/`state_engine.py`/the rest of
+   `main.py` needed zero changes, confirming they really were transport-agnostic already
+   (they operate on `Project` and CLI text, never on `DeviceInterface` internals).
 
 ## Docs drift to be aware of
 

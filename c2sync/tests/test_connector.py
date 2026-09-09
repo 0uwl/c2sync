@@ -4,15 +4,43 @@ import pytest
 
 from netmiko.exceptions import ConfigInvalidException
 
-from c2sync.connector import SerialInterface
+from c2sync import Project
+from c2sync.connector import DeviceInterface
 from c2sync.exceptions import ConfigApplyError, ConfigSaveError
 
 from constants import PROJECT
 
 
-def _make_interface(mock_conn: MagicMock) -> SerialInterface:
+def _make_interface(mock_conn: MagicMock, project: Project = PROJECT) -> DeviceInterface:
     with patch('c2sync.connector.ConnectHandler', return_value=mock_conn):
-        return SerialInterface(PROJECT, username='admin', password='pw')
+        return DeviceInterface(project, username='admin', password='pw')
+
+
+# ------------------------------------------------------------------
+# transport selection
+# ------------------------------------------------------------------
+
+def test_serial_project_passes_serial_settings_to_connecthandler():
+    serial_project = Project(TRANSPORT='serial', SERIAL_DEVICE='/dev/ttyUSB0', BAUDRATE=115200)
+
+    with patch('c2sync.connector.ConnectHandler') as mock_handler:
+        DeviceInterface(serial_project, username='admin', password='pw')
+
+    kwargs = mock_handler.call_args.kwargs
+    assert kwargs['serial_settings'] == {'port': '/dev/ttyUSB0', 'baudrate': 115200}
+    assert 'host' not in kwargs
+
+
+def test_ssh_project_passes_host_and_port_to_connecthandler():
+    ssh_project = Project(TRANSPORT='ssh', HOST='10.0.0.1', SSH_PORT=2222)
+
+    with patch('c2sync.connector.ConnectHandler') as mock_handler:
+        DeviceInterface(ssh_project, username='admin', password='pw')
+
+    kwargs = mock_handler.call_args.kwargs
+    assert kwargs['host'] == '10.0.0.1'
+    assert kwargs['port'] == 2222
+    assert 'serial_settings' not in kwargs
 
 
 def test_apply_config_returns_output_on_success():
