@@ -1,2 +1,3 @@
 netmiko
+ciscoconfparse2
 pytest

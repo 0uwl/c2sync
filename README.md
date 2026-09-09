@@ -8,7 +8,7 @@ The tool lets you:
 
 * Track a device's running configuration in a local git repository
 * Edit the configuration locally using the text editor of your choice (e.g. VS Code)
-* Rebuild the Cisco IOS configuration context structure through a simple indentation-based algorithm
+* Diff your edits against a real Cisco IOS configuration tree, including deletions, not just added lines
 * Push changes back to the device over the serial connection, verified against the device's own response before anything is considered synced
 * Save the running configuration to the startup configuration
 
@@ -78,9 +78,9 @@ Behavior:
 
 ### 3. Local Editing
 
-The user edits `./.c2sync/device.config` with the text editor of their choice. When editing the file, the user should still adhere to the rules of Cisco IOS CLI configuration. This means that to delete a line, simply removing it from the file will not work — deletions are not detected at all today. Instead, do as you would in the CLI and add a negation command (`no ...`). If a line is just deleted, it's silently ignored, and the next time the config is pulled from the device, the line will reappear.
+The user edits `./.c2sync/device.config` with the text editor of their choice, using normal Cisco IOS CLI syntax. Just delete a line to remove it — C2Sync parses the config into a real tree (via `ciscoconfparse2`) and generates the correct `no <command>` for you; you don't need to type the negation yourself, though it still works fine if you do.
 
-When `status`/`sync` recompute staging, C2Sync rebuilds the configuration context to produce the exact commands that would be sent, written to `./.c2sync/staging.txt`.
+When `status`/`sync` recompute staging, C2Sync diffs the parsed tree against the last confirmed baseline and writes the exact commands that would be sent to `./.c2sync/staging.txt`.
 
 Example:
 ```
@@ -89,15 +89,14 @@ interface GigabitEthernet1/0/1
  switchport mode access
  switchport access vlan 100
 ```
-To remove the description and disable link negotiation with C2Sync, you edit this interface like this:
+To remove the description and disable link negotiation, just edit the interface like this:
 ```
 interface GigabitEthernet1/0/1
- no description Server
  switchport mode access
  switchport access vlan 100
  switchport nonegotiate
 ```
-C2Sync diffs the original against the changed file and picks up the added/changed lines. Cisco IOS configurations have hierarchical context that must be included alongside the changed lines, so C2Sync rebuilds it by walking upward through the file until it reaches a line with less leading whitespace. The resulting staged commands look like this:
+C2Sync stages exactly the commands needed to make that change, with the interface context included once:
 ```
 interface GigabitEthernet1/0/1
  no description Server
@@ -110,9 +109,6 @@ interface GigabitEthernet1/0/1
  switchport access vlan 100
  switchport nonegotiate
 ```
-
-> [!NOTE]
-> _This means that you must be mindful of spaces to declare contexts properly_
 
 ### 4. Status
 

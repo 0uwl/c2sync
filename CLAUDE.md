@@ -26,7 +26,7 @@ pytest c2sync/tests -q
 
 # Run a single test file / single test
 pytest c2sync/tests/test_differ.py -q
-pytest c2sync/tests/test_differ.py::test_refresh_staging_writes_correct_output -q
+pytest c2sync/tests/test_differ.py::test_refresh_staging_stages_additions_with_context -q
 
 # Run the CLI locally (after install; requires a real or mocked serial device for
 # anything beyond `init`/`status`/`discard`)
@@ -75,34 +75,35 @@ relative to cwd — commands must be run from the project directory.
 |---|---|
 | `c2sync/__init__.py` | `Project` dataclass, `init_project`/`get_project` |
 | `c2sync/connector.py` | `SerialInterface` — Netmiko `ConnectHandler` wrapper (serial transport only) |
-| `c2sync/differ.py` | `Differ` — indentation-based diff → CLI command blocks |
+| `c2sync/differ.py` | `Differ` — real config-tree diff (`ciscoconfparse2`) → CLI commands |
 | `c2sync/git_ops.py` | Thin `git` subprocess wrapper — `init`/`commit`/`commit_empty`/`show_at_head` |
 | `c2sync/user_config.py` | Reads the optional global TOML preferences file — `load()`/`config_path()` |
-| `c2sync/models.py` | `Addition`, `Command`, `CommandBlock` dataclasses used by `Differ` |
 | `c2sync/state_engine.py` | `StateEngine` — `host_dirty`/`device_dirty` tracking |
 | `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigSaveError` |
 | `c2sync/main.py` | CLI entry point: `init` / `pull` / `status` / `sync` / `commit` / `discard` |
 
 ### Diff → CLI command translation (`differ.py`)
 
-Indentation-based, not a real parser — this is a known limitation, see Constraints
-below. Pipeline in `Differ._build_command_blocks`:
+A real config-tree parser, not indentation-counting — `Differ.refresh_staging()` is a
+thin wrapper around `ciscoconfparse2.Diff(baseline_config, current_config,
+syntax='ios').get_diff()`. `Diff` parses both configs into a real parent/child tree
+(via `ciscoconfparse2`'s vendored `hier_config`) and returns the exact CLI lines needed
+to turn the baseline into the current config, context headers included, ready to write
+straight to `STAGING_FILE` — there's no `Addition`/`Command`/`CommandBlock` modeling of
+our own anymore (that whole layer, and `models.py`, is gone).
 
-1. `difflib.ndiff(baseline_lines, current_lines)` — only `"+ "` (added) lines are used;
-   `"- "` (removed) lines are **discarded entirely**. This is why the tool requires
-   typing `no <command>` to remove something instead of deleting the line — deletions
-   are not detected as removals at all.
-2. For each added line, walk upward through `current_lines` collecting every line whose
-   indentation is strictly less than the current running minimum, stopping at column 0
-   — this reconstructs the Cisco CLI context stack (e.g. `interface Gi1/0/1`) purely
-   from leading-space counts.
-3. Commands sharing the same reconstructed context are grouped into one `CommandBlock`
-   so e.g. two edits under the same `interface` are sent together rather than
-   re-entering the context twice.
+This is what makes two things work for free, not just as future work:
+- **Real deletions.** A line that's just removed from the file (not manually replaced
+  with `no <command>`) now produces an actual negation command — `hier_config` diffs
+  the parsed trees, not raw text, so a missing child under an unchanged parent is a
+  removal it detects on its own.
+- **Multi-line blocks.** Banners/macros are parsed as opaque blocks; an unrelated
+  change elsewhere in the config doesn't cause them to be re-diffed line by line.
 
-Example: editing `description X` → `no description X` plus adding `switchport
-nonegotiate` under `interface GigabitEthernet1/0/1` produces one `CommandBlock` with
-that interface as context and both lines as actions, sent as one grouped push.
+Example: deleting the `description Server` line and adding `switchport nonegotiate`
+under `interface GigabitEthernet1/0/1` produces `interface GigabitEthernet1/0/1` /
+`no description Server` / `switchport nonegotiate` — the context header appears once,
+with both the negation and the addition grouped under it.
 
 ### On-demand change detection (no background watcher)
 
@@ -218,11 +219,8 @@ but broken config is very likely a real mistake worth surfacing.
 
 ## Known constraints / simplifications
 
-- No support for multi-line config blocks (banners, macros) — the differ has no concept
-  of an opaque block, it's line-by-line.
-- No automatic handling of deletions (see Diff → CLI translation above) — must type
-  `no <command>` instead of deleting a line.
-- Assumes Cisco IOS-style indentation; `device_type='cisco_ios'` is hardcoded.
+- Cisco IOS only; `device_type='cisco_ios'` is hardcoded in `connector.py`, and
+  `Diff(..., syntax='ios')` is hardcoded in `differ.py`.
 - No rollback if command N of a multi-command batch is rejected after N-1 already
   landed on the device.
 - No file locking on `state.json`/`staging.txt` — fine for one interactive CLI
@@ -246,12 +244,15 @@ See `HANDOFF.md` for the full write-up. Priority order, user-approved:
    from the environment when both username and password are set, only falling back to
    interactive prompts otherwise; nothing is persisted by c2sync (see Device transport
    below). `pull` (gap #2) is also done — see CLI surface above.
-2. **A real config-tree parser, after git** — replace the indentation-walking in
-   `differ.py` with **ciscoconfparse** (or `ciscoconfparse2`), which parses IOS-style
-   config into a real parent/child tree. Not TextFSM — TextFSM parses flat command
-   *output* (e.g. `show version`) via regex templates, it has no concept of
-   hierarchical config structure. This should be what finally makes real deletion
-   handling and multi-line blocks tractable.
+2. **A real config-tree parser — done.** `differ.py` is now a thin wrapper around
+   `ciscoconfparse2.Diff` (see Diff → CLI command translation above) instead of
+   hand-rolled indentation-walking. Not TextFSM — TextFSM parses flat command *output*
+   (e.g. `show version`) via regex templates, it has no concept of hierarchical config
+   structure. Real deletion handling and multi-line block support both came from this
+   for free — no extra code needed beyond calling `get_diff()`. `models.py`
+   (`Addition`/`Command`/`CommandBlock`) was deleted entirely rather than kept
+   half-used: `ciscoconfparse2.Diff.get_diff()` already returns ready-to-write CLI
+   lines, so there was nothing left for that layer to do.
 3. **SSH as a second transport — designed for, not built yet.** Since `connector.py`
    already goes through Netmiko, SSH is close to swapping `serial_settings={...}` for
    `host=...` on the same `device_type`. Keep `differ.py`/`state_engine.py`/`main.py`
