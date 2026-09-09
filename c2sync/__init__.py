@@ -8,7 +8,9 @@ LOGGER = logging.getLogger(__name__)
 
 APP_CONFIG_NAME = 'c2sync.config'
 DEVICE_CONFIG_NAME = 'device.config'
+BASELINE_CONFIG_NAME = 'baseline.config'
 STAGING_FILE_NAME = 'staging.txt'
+STATE_FILE_NAME = 'state.json'
 PROJECT_ROOT = './.c2sync'
 
 @dataclass
@@ -19,8 +21,13 @@ class Project:
     PROJECT_DIR: str = PROJECT_ROOT
     CONFIG_FILE: str = os.path.join(PROJECT_DIR, APP_CONFIG_NAME)
     EDIT_FILE: str = os.path.join(PROJECT_DIR, DEVICE_CONFIG_NAME)
+    # Snapshot of the config as it looked the last time it was known to
+    # match the device (right after init or a confirmed sync). Diffing the
+    # live EDIT_FILE against this on demand is what replaces the watcher.
+    BASELINE_FILE: str = os.path.join(PROJECT_DIR, BASELINE_CONFIG_NAME)
     PROMPT_REGEX: str = r'[>#]\s?$'
     STAGING_FILE: str = os.path.join(PROJECT_DIR, STAGING_FILE_NAME)
+    STATE_FILE: str = os.path.join(PROJECT_DIR, STATE_FILE_NAME)
 
     def to_dict(self):
         return {
@@ -29,8 +36,10 @@ class Project:
         'TIMEOUT': self.TIMEOUT,
         'PROJECT_DIR': self.PROJECT_DIR,
         'EDIT_FILE': self.EDIT_FILE,
+        'BASELINE_FILE': self.BASELINE_FILE,
         'PROMPT_REGEX': self.PROMPT_REGEX,
-        'STAGING_FILE': self.STAGING_FILE
+        'STAGING_FILE': self.STAGING_FILE,
+        'STATE_FILE': self.STATE_FILE
     }
 
 
@@ -45,7 +54,11 @@ def init_project(project_config: Project):
         json.dump(config_dict, config_file)
 
     open(project_config.EDIT_FILE, 'w').close()
+    open(project_config.BASELINE_FILE, 'w').close()
     open(project_config.STAGING_FILE, 'w').close()
+
+    with open(project_config.STATE_FILE, 'w') as state_file:
+        json.dump({'host_dirty': False, 'device_dirty': False}, state_file)
 
     LOGGER.info(f'Created project')
     print('C2Sync project initialized')

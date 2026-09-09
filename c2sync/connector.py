@@ -1,113 +1,88 @@
-import time
-import re
 import logging
+import re
 
-from serial import Serial
+from netmiko import ConnectHandler
+from netmiko.exceptions import ConfigInvalidException
 
 from c2sync import Project
+from c2sync.exceptions import ConfigApplyError, ConfigSaveError
 
 LOGGER = logging.getLogger(__name__)
 
+# Standard Cisco IOS CLI error prefixes. Passed to Netmiko as error_pattern so
+# a rejected command aborts the push immediately instead of being silently
+# sent along with the rest of the staged changes.
+IOS_ERROR_PATTERN = r'%\s*(?:Invalid input|Incomplete command|Ambiguous command|Unrecognized command)'
+
+# "write memory" only ever reports success via this marker on IOS; anything
+# else (a prompt for confirmation, a permission error, no response) means the
+# device did not actually persist the config.
+IOS_SAVE_SUCCESS_PATTERN = r'\[OK\]'
+
+
 class SerialInterface:
-    def __init__(self, project: Project) -> None:
-        self.serial = Serial(
-            port=project.SERIAL_DEVICE,
-            baudrate=project.BAUDRATE,
-            timeout=project.TIMEOUT
+    """
+    Console/serial connection to a network device, backed by Netmiko.
+
+    Netmiko's ConnectHandler drives the serial port directly (via its
+    `serial_settings` transport) and handles prompt detection, paging,
+    and AAA login as part of session setup.
+    """
+
+    def __init__(self, project: Project, username: str = None, password: str = None, secret: str = None) -> None:
+        self.conn = ConnectHandler(
+            device_type='cisco_ios',
+            serial_settings={
+                'port': project.SERIAL_DEVICE,
+                'baudrate': project.BAUDRATE,
+            },
+            timeout=project.TIMEOUT,
+            username=username,
+            password=password,
+            secret=secret,
         )
-        self.timeout = project.TIMEOUT
-        self.prompt_regex = project.PROMPT_REGEX
-
-
-    def send_command(self, command: str):
-        if self.serial.writable():
-            LOGGER.debug(f'Sending command {command} to device')
-            message = command + '\n'
-            self.serial.write(message.encode())
-            response = self.read_until_prompt()
-            LOGGER.debug(f'Recieved response: {response}')
-            return response
-
-
-    def read_until_prompt(self, timeout: int=-1):
-        timeout = self.timeout if timeout is -1 else timeout
-        buffer = ''
-        start_time = time.time()
-
-        while True:
-            if self.serial.in_waiting:
-                chunk = self.serial.read(self.serial.in_waiting).decode(errors="ignore")
-                buffer += chunk
-
-                lines = buffer.strip().splitlines()
-                if lines and re.search(self.prompt_regex, lines[-1]):
-                    return buffer
-                    
-            if time.time() - start_time > timeout:
-                return buffer
-
-            time.sleep(0.1)
-
-
-    def login(self, username: str, password: str, timeout: int):
-        timeout = self.timeout if timeout is None else timeout
-        buffer = ''
-        start_time = time.time()
-
-        while True:
-            if self.serial.in_waiting:
-                chunk = self.serial.read(self.serial.in_waiting).decode(errors="ignore")
-                buffer += chunk
-
-                print(chunk, end='')
-
-                if 'Username:' in buffer:
-                    message = username + '\n'
-                    self.serial.write(message.encode())
-                    buffer = ''
-                elif 'Password:' in buffer:
-                    message = password + '\n'
-                    self.serial.write(message.encode())
-                    buffer = ''
-                else:
-                    lines = buffer.strip().splitlines()
-                    if lines and re.search(self.prompt_regex, lines[-1]):
-                        LOGGER.info('Successfully logged in to device')
-                        print('\nLogged in')
-                        return True
-
-            if time.time() - start_time > timeout:
-                raise Exception('Login timedout')
-
-            time.sleep(0.1)
 
 
     def initialize_session(self):
-        self.send_command('enable')
-        self.send_command('terminal length 0')
+        if not self.conn.check_enable_mode():
+            self.conn.enable()
 
 
-    def get_running_config(self):
-        self.send_command('show running-config brief')
-        time.sleep(0.5)
-        return self.read_until_prompt()
+    def get_running_config(self) -> str:
+        return self.conn.send_command('show running-config brief')
 
 
-    def apply_config_blocks(self, blocks: list[list[str]]):
-        print('\nEntering configuration mode...')
-        self.send_command('configure terminal')
+    def apply_config(self, lines: list[str]) -> str:
+        """
+        Push staged CLI lines to the device.
 
-        for block in blocks:
-            for line in block:
-                print(f'SENDING: {line}')
-                self.send_command(line)
+        Raises ConfigApplyError if the device rejects any command, so the
+        caller never has to guess whether a push actually succeeded.
+        """
+        LOGGER.debug(f'Sending config lines: {lines}')
+        try:
+            return self.conn.send_config_set(lines, error_pattern=IOS_ERROR_PATTERN)
+        except ConfigInvalidException as e:
+            raise ConfigApplyError(str(e)) from e
 
-        self.send_command('end')
+
+    def sync_config(self, lines: list[str]) -> str:
+        self.apply_config(lines)
+        return self.get_running_config()
 
 
-    def sync_config(self, blocks: list[list[str]]):
-        self.apply_config_blocks(blocks)
-        
-        new_config = self.get_running_config()
+    def save_config(self) -> str:
+        """
+        Save running-config to startup-config.
 
-        # TODO: Update edit file
+        Raises ConfigSaveError unless the device's own response confirms
+        the save actually happened.
+        """
+        output = self.conn.save_config()
+        if not re.search(IOS_SAVE_SUCCESS_PATTERN, output):
+            raise ConfigSaveError(f'Device did not confirm the save: {output!r}')
+        return output
+
+
+    def disconnect(self):
+        self.conn.disconnect()

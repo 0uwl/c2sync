@@ -9,8 +9,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 
 dependencies = [
-  "pyserial",
-  "watchdog",
+  "netmiko",
   "pytest"
 ]
 

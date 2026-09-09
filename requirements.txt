@@ -1,3 +1,2 @@
-pyserial
-watchdog
+netmiko
 pytest
