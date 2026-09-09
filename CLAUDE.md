@@ -31,6 +31,7 @@ pytest c2sync/tests/test_differ.py::test_refresh_staging_writes_correct_output -
 # Run the CLI locally (after install; requires a real or mocked serial device for
 # anything beyond `init`/`status`/`discard`)
 c2sync init /dev/ttyUSB0 [BAUDRATE]
+c2sync pull [-y]
 c2sync status
 c2sync sync [-y]
 c2sync commit [-y]
@@ -80,7 +81,7 @@ relative to cwd — commands must be run from the project directory.
 | `c2sync/models.py` | `Addition`, `Command`, `CommandBlock` dataclasses used by `Differ` |
 | `c2sync/state_engine.py` | `StateEngine` — `host_dirty`/`device_dirty` tracking |
 | `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigSaveError` |
-| `c2sync/main.py` | CLI entry point: `init` / `status` / `sync` / `commit` / `discard` |
+| `c2sync/main.py` | CLI entry point: `init` / `pull` / `status` / `sync` / `commit` / `discard` |
 
 ### Diff → CLI command translation (`differ.py`)
 
@@ -148,7 +149,13 @@ returns — never optimistically.
 
 ### CLI surface (`main.py`)
 
-Actual commands: `init`, `status`, `sync`, `commit`, `discard`. `status` is read-only
+Actual commands: `init`, `pull`, `status`, `sync`, `commit`, `discard`. `pull` connects,
+fetches `show running-config brief`, writes it to `EDIT_FILE`, and commits it — this is
+how an already-configured device gets onboarded (`init` alone only creates an empty
+`device.config`), and it doubles as a way to resync the baseline if the device changed
+out-of-band. It refuses to run while `host_dirty` unless passed `-y` (would silently
+clobber uncommitted local edits); when not `host_dirty` it needs no confirmation at all,
+since there's nothing local to lose. `status` is read-only
 (recomputes staging, prints state + preview, never connects to the device — this is the
 `git status` analog). `sync` pushes, then re-fetches `show running-config brief`,
 writes it to `EDIT_FILE`, and makes a real git commit in `PROJECT_DIR` (`git_ops.
@@ -220,8 +227,6 @@ but broken config is very likely a real mistake worth surfacing.
   landed on the device.
 - No file locking on `state.json`/`staging.txt` — fine for one interactive CLI
   invocation at a time, not safe for concurrent access.
-- No `pull` command exists — `init` only creates empty files (now git-committed empty),
-  so there is currently no way to onboard an already-configured device.
 
 ## Roadmap and active design decisions
 
@@ -240,8 +245,7 @@ See `HANDOFF.md` for the full write-up. Priority order, user-approved:
    also done — `_connect()` takes `C2SYNC_USERNAME`/`C2SYNC_PASSWORD`/`C2SYNC_SECRET`
    from the environment when both username and password are set, only falling back to
    interactive prompts otherwise; nothing is persisted by c2sync (see Device transport
-   below). Not yet built: `pull` (still gap #2 below — onboarding an already-configured
-   device needs a real first commit of its actual config, not an empty one).
+   below). `pull` (gap #2) is also done — see CLI surface above.
 2. **A real config-tree parser, after git** — replace the indentation-walking in
    `differ.py` with **ciscoconfparse** (or `ciscoconfparse2`), which parses IOS-style
    config into a real parent/child tree. Not TextFSM — TextFSM parses flat command

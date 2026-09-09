@@ -38,7 +38,7 @@ Not published to PyPI yet — install from a checkout of this repository:
 pip install -e .
 ```
 
-Requires Python 3.11+ (for reading the optional global config file, see Configuration below) and a real or mocked serial connection for anything beyond `init`/`status`/`discard`.
+Requires Python 3.11+ (for reading the optional global config file, see Configuration below) and a real or mocked serial connection for anything beyond `init`/`status`/`discard` — `pull`/`sync`/`commit` all need to reach the device.
 
 ## Usage
 ### CLI Commands
@@ -47,6 +47,7 @@ c2sync COMMAND
 
 Commands:
   init      SERIAL_DEVICE [BAUDRATE]  Start a project for one device in the current directory
+  pull      [-y]                      Fetch the device's running config and make it the new baseline
   status                              Show whether there are unsynced local edits or an unsaved device change
   sync      [-y]                      Preview and push staged changes to the device
   commit    [-y]                      Save the device's running config to its startup config
@@ -65,7 +66,17 @@ Behavior:
 * Initializes a git repository there and makes the first commit (an empty `device.config`)
 * `BAUDRATE` defaults to 9600, or to the global config's `baudrate` if set (see Configuration below)
 
-### 2. Local Editing
+### 2. Pull
+
+```
+c2sync pull [-y]
+```
+Behavior:
+* Connects to the device, fetches the running config, and commits it as the new baseline — this is how you onboard a device that's already configured (`init` alone only creates an empty `device.config`)
+* Also useful later to resync the baseline if the device changed outside of C2Sync
+* Refuses to run if you have unsynced local edits, unless `-y` is passed to overwrite them
+
+### 3. Local Editing
 
 The user edits `./.c2sync/device.config` with the text editor of their choice. When editing the file, the user should still adhere to the rules of Cisco IOS CLI configuration. This means that to delete a line, simply removing it from the file will not work — deletions are not detected at all today. Instead, do as you would in the CLI and add a negation command (`no ...`). If a line is just deleted, it's silently ignored, and the next time the config is pulled from the device, the line will reappear.
 
@@ -103,7 +114,7 @@ interface GigabitEthernet1/0/1
 > [!NOTE]
 > _This means that you must be mindful of spaces to declare contexts properly_
 
-### 3. Status
+### 4. Status
 
 ```
 c2sync status
@@ -113,7 +124,7 @@ Behavior:
 * Previews the exact CLI commands that `sync` would send
 * Read-only — never connects to the device
 
-### 4. Sync
+### 5. Sync
 
 ```
 c2sync sync [-y]
@@ -125,7 +136,7 @@ Behavior:
 * Displays the commands that will be sent, then pushes them if confirmed
 * Re-fetches the running config and commits it to the project's git repository — this becomes the new baseline for the next diff
 
-### 5. Commit
+### 6. Commit
 
 ```
 c2sync commit [-y]
@@ -135,7 +146,7 @@ Behavior:
 * Refuses to run while there are unsynced local edits — run `sync` first
 * Records the save as a git commit (no file content changes, so it's an empty commit marking the milestone)
 
-### 6. Discard
+### 7. Discard
 
 ```
 c2sync discard
@@ -145,7 +156,7 @@ Behavior:
 
 ## Credentials
 
-`sync`/`commit` need to log in to the device. In order of precedence:
+`pull`/`sync`/`commit` need to log in to the device. In order of precedence:
 1. `C2SYNC_USERNAME` / `C2SYNC_PASSWORD` / `C2SYNC_SECRET` environment variables
 2. `username` from the global config file (see Configuration below) — password and enable-secret are never read from there
 3. An interactive prompt for whatever's still missing

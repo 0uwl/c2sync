@@ -122,6 +122,59 @@ def test_init_cli_baudrate_overrides_global_config(tmp_path, monkeypatch):
 
 
 # ------------------------------------------------------------------
+# pull
+# ------------------------------------------------------------------
+
+def test_pull_fetches_and_commits_running_config(project):
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_command.return_value = 'hostname Router1\ninterface Gi1/0/1\n'
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.pull([])
+
+    with open(project.EDIT_FILE) as file:
+        assert file.read() == 'hostname Router1\ninterface Gi1/0/1\n'
+
+    assert StateEngine(project).state.host_dirty is False
+
+    # The pulled config is now the git baseline - status shouldn't restage it.
+    main_module.status([])
+    with open(project.STAGING_FILE) as file:
+        assert file.read() == ''
+
+
+def test_pull_refuses_when_host_dirty_without_force(project):
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
+    main_module.status([])
+    assert StateEngine(project).state.host_dirty is True
+
+    with patch('c2sync.connector.ConnectHandler') as mock_handler:
+        with pytest.raises(SystemExit):
+            main_module.pull([])
+        mock_handler.assert_not_called()
+
+
+def test_pull_overwrites_host_dirty_edits_with_force(project):
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
+    main_module.status([])
+    assert StateEngine(project).state.host_dirty is True
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_command.return_value = 'hostname Router1\n'
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.pull(['-y'])
+
+    with open(project.EDIT_FILE) as file:
+        assert file.read() == 'hostname Router1\n'
+    assert StateEngine(project).state.host_dirty is False
+
+
+# ------------------------------------------------------------------
 # status / on-demand refresh
 # ------------------------------------------------------------------
 

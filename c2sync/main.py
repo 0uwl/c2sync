@@ -19,6 +19,7 @@ c2sync COMMAND
 
 Commands:
     init         Start a C2Sync session in the current working directory
+    pull         Fetch the device's running config and make it the new baseline
     status       Show whether the local config file has unsynced edits
     sync         Preview changes and confirm or abort them
     commit       Issues the command to save the running config to the startup config on the device
@@ -37,6 +38,8 @@ def main():
     match command:
         case 'init':
             init(command_arguments)
+        case 'pull':
+            pull(command_arguments)
         case 'status':
             status(command_arguments)
         case 'sync':
@@ -69,6 +72,41 @@ def init(arguments: list):
         project_kwargs['PROMPT_REGEX'] = config['prompt_regex']
 
     init_project(Project(**project_kwargs))
+
+
+def pull(arguments: list):
+    """
+    Fetch the device's actual running config and commit it as the new
+    baseline - this is how an already-configured device gets onboarded
+    (init alone only creates an empty device.config), and how the local
+    baseline can be resynced if the device changed out-of-band.
+    """
+    LOGGER.debug(f'Given arguments: {arguments}')
+    force = '-y' in arguments
+
+    project = _require_project()
+
+    state = StateEngine(project).state
+    if state.host_dirty and not force:
+        print('You have unsynced local edits that would be overwritten. Run '
+              '`c2sync discard` first, or `c2sync pull -y` to overwrite them anyway.')
+        sys.exit(1)
+
+    interface = _connect(project)
+    try:
+        new_config = interface.get_running_config()
+    finally:
+        interface.disconnect()
+
+    with open(project.EDIT_FILE, 'w') as file:
+        file.write(new_config)
+
+    edit_file_name = os.path.relpath(project.EDIT_FILE, project.PROJECT_DIR)
+    git_ops.commit(project.PROJECT_DIR, [edit_file_name], f'c2sync pull: fetched from {project.SERIAL_DEVICE}')
+
+    Differ(project).clear_staging()
+    StateEngine(project).mark_host_clean()
+    print('Pulled running config from device.')
 
 
 def status(arguments: list):
