@@ -1,4 +1,4 @@
-## C2Sync – Console Configuration Synchronizer
+## C2Sync – CLI Config Synchronizer
 
 ## Overview
 
