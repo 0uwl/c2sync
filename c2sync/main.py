@@ -5,7 +5,7 @@ import sys
 
 from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutException
 
-from c2sync import Project, get_project, git_ops, init_project
+from c2sync import Project, get_project, git_ops, init_project, user_config
 from c2sync.connector import SerialInterface
 from c2sync.differ import Differ
 from c2sync.exceptions import ConfigApplyError, ConfigSaveError
@@ -57,10 +57,18 @@ def init(arguments: list):
         print('Usage: c2sync init SERIAL_DEVICE [BAUDRATE]')
         sys.exit(1)
 
-    serial_device = arguments[0]
-    baudrate = int(arguments[1]) if len(arguments) > 1 else 9600
+    config = user_config.load()
 
-    init_project(Project(SERIAL_DEVICE=serial_device, BAUDRATE=baudrate))
+    serial_device = arguments[0]
+    baudrate = int(arguments[1]) if len(arguments) > 1 else config.get('baudrate', 9600)
+
+    project_kwargs = {'SERIAL_DEVICE': serial_device, 'BAUDRATE': baudrate}
+    if 'timeout' in config:
+        project_kwargs['TIMEOUT'] = config['timeout']
+    if 'prompt_regex' in config:
+        project_kwargs['PROMPT_REGEX'] = config['prompt_regex']
+
+    init_project(Project(**project_kwargs))
 
 
 def status(arguments: list):
@@ -214,18 +222,22 @@ def _confirm(prompt: str) -> bool:
 
 
 def _connect(project: Project) -> SerialInterface:
-    # CI/non-interactive path: only take credentials from the environment
-    # if both username and password are present, so a partially-set
-    # environment falls back to fully interactive rather than half-prompting
-    # (and potentially hanging on stdin in CI).
-    username = os.environ.get('C2SYNC_USERNAME')
+    # Username is not a secret, so it can also come from the user's global
+    # config (~/.config/c2sync/config.toml) - password/secret never do, only
+    # the env vars below or an interactive prompt.
+    config = user_config.load()
+    username = os.environ.get('C2SYNC_USERNAME') or config.get('username')
     password = os.environ.get('C2SYNC_PASSWORD')
 
+    # CI/non-interactive path: only skip prompting if both are already
+    # resolved, so a partially-set environment falls back to fully
+    # interactive rather than half-prompting (and potentially hanging on
+    # stdin in CI).
     if username is not None and password is not None:
         secret = os.environ.get('C2SYNC_SECRET') or None
     else:
-        username = input('Username: ')
-        password = getpass.getpass('Password: ')
+        username = username or input('Username: ')
+        password = password or getpass.getpass('Password: ')
         secret = getpass.getpass('Enable secret (leave blank if none): ') or None
 
     try:

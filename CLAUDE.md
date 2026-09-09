@@ -15,6 +15,8 @@ There is no lint/format tooling configured in this repo (no ruff/black/flake8 co
 
 ## Commands
 
+Requires Python >=3.11 (for stdlib `tomllib`, used to read the global config file).
+
 ```bash
 # Install (editable, with dependencies from pyproject.toml: netmiko, pytest)
 pip install -e .
@@ -75,6 +77,7 @@ relative to cwd — commands must be run from the project directory.
 | `c2sync/connector.py` | `SerialInterface` — Netmiko `ConnectHandler` wrapper (serial transport only) |
 | `c2sync/differ.py` | `Differ` — indentation-based diff → CLI command blocks |
 | `c2sync/git_ops.py` | Thin `git` subprocess wrapper — `init`/`commit`/`commit_empty`/`show_at_head` |
+| `c2sync/user_config.py` | Reads the optional global TOML preferences file — `load()`/`config_path()` |
 | `c2sync/models.py` | `Addition`, `Command`, `CommandBlock` dataclasses used by `Differ` |
 | `c2sync/state_engine.py` | `StateEngine` — `host_dirty`/`device_dirty` tracking |
 | `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigSaveError` |
@@ -163,20 +166,49 @@ staging) so discarded edits can't get silently re-staged on the next check.
 repo is a normal git repo the user can drive directly with `git` or push to
 GitHub/GitLab for review.
 
-`_connect()` in `main.py` checks `C2SYNC_USERNAME`/`C2SYNC_PASSWORD`/`C2SYNC_SECRET`
-env vars first; only falls back to `input()`/`getpass.getpass()` if username or
-password isn't set (all-or-nothing, so a partially-set environment doesn't hang
-on stdin in CI). Credentials are never stored anywhere by c2sync itself — env vars
-are meant to be injected by the CI system's own secrets manager, not read from a
-file c2sync writes. Combined with `sync -y`/`commit -y` (skips the confirmation
-prompt too), this is what unblocks the PR-merge-triggers-apply workflow from
-`HANDOFF.md`'s roadmap. A `docker login`-style persistent credential store was
-considered and explicitly declined: `docker login`'s own default storage is
-just base64 in a config file (obfuscation, not encryption) unless a credential
+`_connect()` in `main.py` resolves `username` from `C2SYNC_USERNAME`, then the global
+config's `username` key (see Global user config below); `password` only from
+`C2SYNC_PASSWORD`. It only skips `input()`/`getpass.getpass()` once both username and
+password are resolved — a partially-set environment (or a config file with no
+`C2SYNC_PASSWORD` set) falls back to prompting for whatever's still missing, never
+half-prompts or hangs on stdin in CI. `C2SYNC_SECRET` is checked the same way as
+`C2SYNC_PASSWORD` but is optional either way (`None` if unset, prompted for otherwise).
+Passwords/enable-secrets are **never** read from the global config file or stored
+anywhere by c2sync itself — env vars are meant to be injected by the CI system's own
+secrets manager. Combined with `sync -y`/`commit -y` (skips the confirmation prompt
+too), this is what unblocks the PR-merge-triggers-apply workflow from `HANDOFF.md`'s
+roadmap.
+
+A `docker login`-style persistent credential store (i.e. one that also holds the
+password) was considered and explicitly declined: `docker login`'s own default storage
+is just base64 in a config file (obfuscation, not encryption) unless a credential
 helper is configured, and that's a real security downgrade for device-admin
-credentials versus prompting every time. If interactive persistence is wanted
-later, the OS-native keyring (`keyring` package) is the option on the table —
+credentials versus prompting every time. If interactive password persistence is
+wanted later, the OS-native keyring (`keyring` package) is the option on the table —
 not a home-grown file store.
+
+### Global user config (`user_config.py`)
+
+An entirely optional TOML file at `$XDG_CONFIG_HOME/c2sync/config.toml` (default
+`~/.config/c2sync/config.toml`) for **non-secret** preferences only — `user_config.
+load()` returns `{}` if it doesn't exist, and every key it can hold already has a
+working default, so nothing breaks without it. `user_config.config_path()` resolves
+the path fresh on each call (not a module-level constant) specifically so tests can
+`monkeypatch.setenv('XDG_CONFIG_HOME', ...)` without reloading the module.
+
+Recognized keys, all optional:
+- `username` — read by `_connect()` (see CLI surface above); never the password/secret.
+- `baudrate` — default for `c2sync init`'s optional `BAUDRATE` argument; an explicit
+  CLI argument still wins.
+- `timeout` / `prompt_regex` — passed through to `Project.TIMEOUT`/`PROMPT_REGEX` at
+  `init` time if present, otherwise the `Project` dataclass's own defaults apply.
+
+TOML (not JSON) specifically because `tomllib` is stdlib as of Python 3.11 — this is
+why `pyproject.toml`'s `requires-python` was bumped from `>=3.9` to `>=3.11`. `tomllib`
+is read-only; that's fine here because this file is meant to be hand-edited by the
+user, not written by c2sync. A malformed file prints a parse error and exits (`sys.
+exit(1)`) rather than silently ignoring it, since — unlike a missing file — a present
+but broken config is very likely a real mistake worth surfacing.
 
 ## Known constraints / simplifications
 
