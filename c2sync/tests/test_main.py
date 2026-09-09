@@ -30,6 +30,50 @@ def _mocked_connect(mock_conn):
 
 
 # ------------------------------------------------------------------
+# credentials
+# ------------------------------------------------------------------
+
+def test_connect_uses_env_credentials_without_prompting(project, monkeypatch):
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
+
+    monkeypatch.setenv('C2SYNC_USERNAME', 'admin')
+    monkeypatch.setenv('C2SYNC_PASSWORD', 'pw')
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_config_set.return_value = 'interface Gi1/0/1\n shutdown\nend'
+    mock_conn.send_command.return_value = 'interface Gi1/0/1\n shutdown\n!'
+
+    def _fail_if_prompted(*args, **kwargs):
+        raise AssertionError('should not prompt when both env vars are set')
+
+    with patch('c2sync.connector.ConnectHandler', return_value=mock_conn), \
+         patch('builtins.input', side_effect=_fail_if_prompted), \
+         patch('getpass.getpass', side_effect=_fail_if_prompted):
+        main_module.sync(['-y'])
+
+    assert StateEngine(project).state.device_dirty is True
+
+
+def test_connect_falls_back_to_prompt_when_env_partially_set(project, monkeypatch):
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
+
+    monkeypatch.setenv('C2SYNC_USERNAME', 'admin')
+    monkeypatch.delenv('C2SYNC_PASSWORD', raising=False)
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_config_set.return_value = 'interface Gi1/0/1\n shutdown\nend'
+    mock_conn.send_command.return_value = 'interface Gi1/0/1\n shutdown\n!'
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.sync(['-y'])
+
+    assert StateEngine(project).state.device_dirty is True
+
+
+# ------------------------------------------------------------------
 # status / on-demand refresh
 # ------------------------------------------------------------------
 

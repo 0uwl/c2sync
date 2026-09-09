@@ -214,9 +214,19 @@ def _confirm(prompt: str) -> bool:
 
 
 def _connect(project: Project) -> SerialInterface:
-    username = input('Username: ')
-    password = getpass.getpass('Password: ')
-    secret = getpass.getpass('Enable secret (leave blank if none): ') or None
+    # CI/non-interactive path: only take credentials from the environment
+    # if both username and password are present, so a partially-set
+    # environment falls back to fully interactive rather than half-prompting
+    # (and potentially hanging on stdin in CI).
+    username = os.environ.get('C2SYNC_USERNAME')
+    password = os.environ.get('C2SYNC_PASSWORD')
+
+    if username is not None and password is not None:
+        secret = os.environ.get('C2SYNC_SECRET') or None
+    else:
+        username = input('Username: ')
+        password = getpass.getpass('Password: ')
+        secret = getpass.getpass('Enable secret (leave blank if none): ') or None
 
     try:
         interface = SerialInterface(project, username=username, password=password, secret=secret)

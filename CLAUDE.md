@@ -163,8 +163,20 @@ staging) so discarded edits can't get silently re-staged on the next check.
 repo is a normal git repo the user can drive directly with `git` or push to
 GitHub/GitLab for review.
 
-`_connect()` in `main.py` is interactive-only (`input()`/`getpass.getpass()`) — there is
-currently no non-interactive/CI credential path.
+`_connect()` in `main.py` checks `C2SYNC_USERNAME`/`C2SYNC_PASSWORD`/`C2SYNC_SECRET`
+env vars first; only falls back to `input()`/`getpass.getpass()` if username or
+password isn't set (all-or-nothing, so a partially-set environment doesn't hang
+on stdin in CI). Credentials are never stored anywhere by c2sync itself — env vars
+are meant to be injected by the CI system's own secrets manager, not read from a
+file c2sync writes. Combined with `sync -y`/`commit -y` (skips the confirmation
+prompt too), this is what unblocks the PR-merge-triggers-apply workflow from
+`HANDOFF.md`'s roadmap. A `docker login`-style persistent credential store was
+considered and explicitly declined: `docker login`'s own default storage is
+just base64 in a config file (obfuscation, not encryption) unless a credential
+helper is configured, and that's a real security downgrade for device-admin
+credentials versus prompting every time. If interactive persistence is wanted
+later, the OS-native keyring (`keyring` package) is the option on the table —
+not a home-grown file store.
 
 ## Known constraints / simplifications
 
@@ -193,10 +205,12 @@ See `HANDOFF.md` for the full write-up. Priority order, user-approved:
    `diff`/`log`/`branch`/PR review — the user's normal git tooling (and GitHub/GitLab
    for review) operates on the same repo in `PROJECT_DIR` directly. `git_ops.py` shells
    out to the `git` binary via `subprocess` rather than a `gitpython` dependency,
-   consistent with the thin-wrapper decision. Not yet built: `pull` (still gap #2
-   below — onboarding an already-configured device needs a real first commit of its
-   actual config, not an empty one) and non-interactive credentials (gap #6, still
-   blocked on `_connect()`'s `input()`/`getpass.getpass()`).
+   consistent with the thin-wrapper decision. Non-interactive credentials (gap #6) are
+   also done — `_connect()` takes `C2SYNC_USERNAME`/`C2SYNC_PASSWORD`/`C2SYNC_SECRET`
+   from the environment when both username and password are set, only falling back to
+   interactive prompts otherwise; nothing is persisted by c2sync (see Device transport
+   below). Not yet built: `pull` (still gap #2 below — onboarding an already-configured
+   device needs a real first commit of its actual config, not an empty one).
 2. **A real config-tree parser, after git** — replace the indentation-walking in
    `differ.py` with **ciscoconfparse** (or `ciscoconfparse2`), which parses IOS-style
    config into a real parent/child tree. Not TextFSM — TextFSM parses flat command
