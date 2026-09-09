@@ -47,9 +47,8 @@ files, not a package import.
 ### Project directory model
 
 `c2sync init SERIAL_DEVICE [BAUDRATE]` creates `./.c2sync/` holding the entire state
-for **one device** (there is currently no multi-device registry, despite `README.md`
-describing "one project, many devices" — that's aspirational, not implemented; see
-Docs drift below):
+for **one device** — there is currently no multi-device registry (see the explicit
+non-goal in `HANDOFF.md`):
 
 - `device.config` (`EDIT_FILE`) — what the user edits in their text editor. Tracked in
   a real git repo (`git init` inside `PROJECT_DIR` at `init` time) — the baseline is no
@@ -257,9 +256,8 @@ See `HANDOFF.md` for the full write-up. Priority order, user-approved:
 
 ## Docs drift to be aware of
 
-`README.md` documents a CLI surface (`init, pull, sync, status, diff, commit`) and a
-multi-device registry (`register.json`) that do not match the current implementation
-(`init, status, sync, commit, discard`; single device per project; no registry file).
-Treat `main.py` as ground truth for the actual CLI, not `README.md`, until the docs are
-reconciled — which is intentionally deferred until after the Roadmap items above land
-rather than chased as a moving target now.
+`README.md` was reconciled with the actual implementation (real CLI surface, single
+device per project, git integration, credentials/global config) after Priority 1
+landed. Still, treat `main.py` as ground truth over `README.md` if they ever
+disagree again — reconciling docs after each roadmap item lands is the intended
+cadence, not a one-time fix.
