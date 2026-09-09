@@ -43,6 +43,23 @@ def test_ssh_project_passes_host_and_port_to_connecthandler():
     assert 'serial_settings' not in kwargs
 
 
+def test_ssh_project_verifies_host_keys_instead_of_trusting_any():
+    """
+    Netmiko/Paramiko default to silently trusting any SSH host key
+    (AutoAddPolicy, nothing persisted) - a real MITM exposure. Lock in that
+    we override this to the same known_hosts-verifying model a plain `ssh`
+    client uses.
+    """
+    ssh_project = Project(TRANSPORT='ssh', HOST='10.0.0.1')
+
+    with patch('c2sync.connector.ConnectHandler') as mock_handler:
+        DeviceInterface(ssh_project, username='admin', password='pw')
+
+    kwargs = mock_handler.call_args.kwargs
+    assert kwargs['ssh_strict'] is True
+    assert kwargs['system_host_keys'] is True
+
+
 def test_apply_config_returns_output_on_success():
     mock_conn = MagicMock()
     mock_conn.send_config_set.return_value = 'interface Gi1/0/1\n shutdown\nend'

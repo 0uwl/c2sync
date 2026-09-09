@@ -143,7 +143,19 @@ paging, AAA login, `apply_config`/`save_config`) is identical either way since i
 still Netmiko talking to the same `device_type='cisco_ios'` driver. `Project.target`
 (`c2sync/__init__.py`) returns whichever of `SERIAL_DEVICE`/`HOST` is relevant, so
 callers (`main.py`'s git commit messages) don't need to branch on `TRANSPORT`
-themselves. Two things this wrapper adds on top of raw Netmiko, transport-independent:
+themselves.
+
+The SSH branch also passes `ssh_strict=True, system_host_keys=True` — Netmiko/Paramiko
+default to `ssh_strict=False` (`AutoAddPolicy`: silently trust and never persist any
+host key presented, on every connection), which is a real MITM exposure for device
+credentials once you're connecting over a network instead of a local serial cable.
+`system_host_keys=True` makes it verify against `~/.ssh/known_hosts` instead, the same
+trust-on-first-use-with-persistence model a plain `ssh` client uses. Practical
+consequence: a device whose host key isn't already trusted there will fail to connect
+until the operator trusts it once outside c2sync (e.g. a plain `ssh user@host` or
+`ssh-keyscan`) — correct, expected behavior, not a bug.
+
+Two things this wrapper adds on top of raw Netmiko, transport-independent:
 
 - `apply_config()` passes an IOS `error_pattern` to `send_config_set()`, so a rejected
   command raises `ConfigApplyError` instead of being silently pushed with the rest of

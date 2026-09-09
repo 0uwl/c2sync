@@ -33,7 +33,17 @@ class DeviceInterface:
 
     def __init__(self, project: Project, username: str = None, password: str = None, secret: str = None) -> None:
         if project.TRANSPORT == 'ssh':
-            transport_kwargs = {'host': project.HOST, 'port': project.SSH_PORT}
+            # Netmiko/Paramiko default to trusting any host key on every
+            # connection (AutoAddPolicy, nothing persisted) - that's a real
+            # MITM exposure for device credentials. Verify against the
+            # user's own ~/.ssh/known_hosts instead, the same trust model a
+            # plain `ssh` client uses.
+            transport_kwargs = {
+                'host': project.HOST,
+                'port': project.SSH_PORT,
+                'ssh_strict': True,
+                'system_host_keys': True,
+            }
         else:
             transport_kwargs = {'serial_settings': {'port': project.SERIAL_DEVICE, 'baudrate': project.BAUDRATE}}
 
