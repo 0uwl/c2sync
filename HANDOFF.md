@@ -2,8 +2,10 @@
 
 Context dump for a new Claude Code session picking up this project. Written at the
 tip of the `netmiko` branch, immediately before it's merged into `main` via PR.
-Read this first, then `agent-summary.md` (stable design reference) and `README.md`
-(user-facing docs — currently drifted from the real CLI, see Known Gaps).
+`CLAUDE.md` (auto-loaded at session start) has the canonical architecture reference;
+this file is the session-specific narrative behind it — what changed, why, and what's
+decided but not yet built. `README.md` is user-facing docs, currently drifted from the
+real CLI (see Known Gaps below and `CLAUDE.md`'s "Docs drift" section).
 
 ## What C2Sync is
 
