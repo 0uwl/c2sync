@@ -159,10 +159,10 @@ def test_build_command_blocks_end_to_end(differ):
 
 
 # ------------------------------------------------------------------
-# Test: save_to_staging
+# Test: refresh_staging
 # ------------------------------------------------------------------
 
-def test_save_to_staging_writes_correct_output(differ, tmp_path):
+def test_refresh_staging_writes_correct_output(differ):
     old = [
         "interface Gi1/0/1",
     ]
@@ -172,16 +172,75 @@ def test_save_to_staging_writes_correct_output(differ, tmp_path):
         " shutdown",
     ]
 
-    differ.save_to_staging(old, new)
+    staged = differ.refresh_staging(old, new)
 
-    staging_file = differ.staging_file
+    assert staged is True
 
-    content = Path(staging_file).read_text().strip()
+    content = Path(differ.staging_file).read_text().strip()
 
     assert content == "\n".join([
         "interface Gi1/0/1",
         "shutdown"
     ])
+
+
+def test_refresh_staging_returns_false_when_nothing_changed(differ):
+    same = ["interface Gi1/0/1"]
+
+    staged = differ.refresh_staging(same, same)
+
+    assert staged is False
+    assert Path(differ.staging_file).read_text() == ""
+
+
+def test_refresh_staging_overwrites_rather_than_appends(differ):
+    """
+    Unlike the old watcher-driven save_to_staging, refresh_staging always
+    recomputes from a fixed baseline - so re-running it (e.g. after the
+    user keeps editing) replaces the previous result instead of piling on
+    top of it.
+    """
+    old = ["interface Gi1/0/1"]
+
+    differ.refresh_staging(old, ["interface Gi1/0/1", " shutdown"])
+    differ.refresh_staging(old, ["interface Gi1/0/1", " description test"])
+
+    content = Path(differ.staging_file).read_text()
+
+    assert "shutdown" not in content
+    assert "description test" in content
+
+
+# ------------------------------------------------------------------
+# Test: refresh_staging_from_files
+# ------------------------------------------------------------------
+
+def test_refresh_staging_from_files_reads_baseline_and_edit_file(tmp_path):
+    from c2sync import Project
+
+    project_dir = tmp_path / '.c2sync'
+    project_dir.mkdir()
+
+    baseline_file = project_dir / 'baseline.config'
+    edit_file = project_dir / 'device.config'
+    staging_file = project_dir / 'staging.txt'
+
+    baseline_file.write_text("interface Gi1/0/1\n")
+    edit_file.write_text("interface Gi1/0/1\n shutdown\n")
+    staging_file.write_text("")
+
+    project = Project(
+        SERIAL_DEVICE='NOT USED',
+        PROJECT_DIR=str(project_dir),
+        BASELINE_FILE=str(baseline_file),
+        EDIT_FILE=str(edit_file),
+        STAGING_FILE=str(staging_file),
+    )
+
+    staged = Differ(project).refresh_staging_from_files()
+
+    assert staged is True
+    assert "shutdown" in staging_file.read_text()
 
 
 # ------------------------------------------------------------------

@@ -15,28 +15,47 @@ class Differ:
     """
 
     def __init__(self, project: Project) -> None:
+        self.project = project
         self.staging_file = project.STAGING_FILE
 
 
-    def save_to_staging(self, old_lines: List[str], new_lines: List[str]) -> bool:
+    def refresh_staging(self, baseline_lines: List[str], current_lines: List[str]) -> bool:
         """
-        Generate CLI command blocks from config differences and append them
-        to the staging file.
+        Recompute the staging file from scratch by diffing a known-good
+        baseline against the current config, replacing whatever was staged
+        before.
 
-        Returns True if any commands were staged, False if the edit didn't
-        introduce any changes.
+        This is what stands in for the watcher: instead of appending to
+        staging incrementally as edits happen, we always recompute the full
+        diff on demand against the last confirmed baseline, so the result
+        only ever depends on the current file content - never on how many
+        times it's been saved or whether anything was watching.
+
+        Returns True if any commands were staged, False if the current
+        config already matches the baseline.
         """
-        blocks = self._build_command_blocks(old_lines, new_lines)
+        blocks = self._build_command_blocks(baseline_lines, current_lines)
 
-        if not blocks:
-            return False
-
-        with open(self.staging_file, 'a') as file:
+        with open(self.staging_file, 'w') as file:
             for block in blocks:
                 # Convert structured block into CLI lines
                 file.write("\n".join(block.to_lines()) + "\n")
 
-        return True
+        return bool(blocks)
+
+
+    def refresh_staging_from_files(self) -> bool:
+        """
+        Same as refresh_staging, but reads the baseline and current config
+        straight from the project's BASELINE_FILE and EDIT_FILE.
+        """
+        with open(self.project.BASELINE_FILE) as file:
+            baseline_lines = file.readlines()
+
+        with open(self.project.EDIT_FILE) as file:
+            current_lines = file.readlines()
+
+        return self.refresh_staging(baseline_lines, current_lines)
 
 
     def clear_staging(self) -> None:

@@ -11,7 +11,9 @@ def test_init_project():
     assert os.path.exists(PROJECT.PROJECT_DIR)
     assert os.path.isfile(PROJECT.CONFIG_FILE)
     assert os.path.isfile(PROJECT.EDIT_FILE)
+    assert os.path.isfile(PROJECT.BASELINE_FILE)
     assert os.path.isfile(PROJECT.STAGING_FILE)
+    assert os.path.isfile(PROJECT.STATE_FILE)
 
 
 def test_get_project():

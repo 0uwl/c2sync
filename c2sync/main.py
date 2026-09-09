@@ -18,6 +18,7 @@ c2sync COMMAND
 
 Commands:
     init         Start a C2Sync session in the current working directory
+    status       Show whether the local config file has unsynced edits
     sync         Preview changes and confirm or abort them
     commit       Issues the command to save the running config to the startup config on the device
     discard      Cancel the current C2Sync session
@@ -35,6 +36,8 @@ def main():
     match command:
         case 'init':
             init(command_arguments)
+        case 'status':
+            status(command_arguments)
         case 'sync':
             sync(command_arguments)
         case 'commit':
@@ -59,14 +62,31 @@ def init(arguments: list):
     init_project(Project(SERIAL_DEVICE=serial_device, BAUDRATE=baudrate))
 
 
+def status(arguments: list):
+    LOGGER.debug(f'Given arguments: {arguments}')
+
+    project = _require_project()
+    lines = _refresh_staging(project)
+
+    state = StateEngine(project).state
+    print(f'Device state: {state.label}')
+
+    if lines:
+        print('\nStaged commands (run `c2sync sync` to push):\n')
+        for line in lines:
+            print(f'  {line}')
+    elif state.device_dirty:
+        print('Running config has not been saved to startup-config yet (run `c2sync commit`).')
+    else:
+        print('Nothing staged.')
+
+
 def sync(arguments: list):
     LOGGER.debug(f'Given arguments: {arguments}')
     force = '-y' in arguments
 
     project = _require_project()
-
-    with open(project.STAGING_FILE) as file:
-        lines = [line.rstrip('\n') for line in file if line.strip()]
+    lines = _refresh_staging(project)
 
     if not lines:
         print('Nothing staged to sync.')
@@ -96,8 +116,13 @@ def sync(arguments: list):
     state_engine.mark_host_clean()
     state_engine.mark_device_dirty()
 
+    # The device is now the source of truth again - refresh both the file
+    # the user edits and the baseline we diff it against next time, exactly
+    # the way `git commit` advances what HEAD (and the index) point to.
     new_config = interface.get_running_config()
     with open(project.EDIT_FILE, 'w') as file:
+        file.write(new_config)
+    with open(project.BASELINE_FILE, 'w') as file:
         file.write(new_config)
 
     interface.disconnect()
@@ -143,6 +168,14 @@ def discard(arguments: list):
 
     project = _require_project()
 
+    # Revert the edit file itself, not just the staging file - otherwise
+    # the discarded edits would just get re-staged the next time status/sync
+    # recomputes the diff against the baseline.
+    with open(project.BASELINE_FILE) as file:
+        baseline = file.read()
+    with open(project.EDIT_FILE, 'w') as file:
+        file.write(baseline)
+
     Differ(project).clear_staging()
     StateEngine(project).mark_host_clean()
     print('Discarded staged changes.')
@@ -154,6 +187,23 @@ def _require_project() -> Project:
         print('No C2Sync project found in this directory. Run `c2sync init SERIAL_DEVICE` first.')
         sys.exit(1)
     return project
+
+
+def _refresh_staging(project: Project) -> list[str]:
+    """
+    Recompute staging on demand from the baseline vs. the current edit
+    file, update host_dirty accordingly, and return the staged lines.
+    """
+    staged = Differ(project).refresh_staging_from_files()
+
+    state_engine = StateEngine(project)
+    if staged:
+        state_engine.mark_host_dirty()
+    else:
+        state_engine.mark_host_clean()
+
+    with open(project.STAGING_FILE) as file:
+        return [line.rstrip('\n') for line in file if line.strip()]
 
 
 def _confirm(prompt: str) -> bool:

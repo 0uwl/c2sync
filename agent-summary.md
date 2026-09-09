@@ -104,9 +104,16 @@ Required features:
 * Send commands line-by-line
 * Exit config mode (`end`)
 
-### Watcher
+### On-demand change detection
 
-The file watcher looks for changes in the fetched configuration files, runs the context rebuilder and adds the result into a staging file. 
+C2Sync does not run a background watcher. Instead it mirrors how `git status`/`git diff`
+work: a `BASELINE_FILE` snapshot is kept of the config as it looked the last time it was
+known to match the device (right after init or a confirmed sync) - the equivalent of
+git's index/blob. On every `status`/`sync`, the live `EDIT_FILE` is diffed fresh against
+that baseline (`Differ.refresh_staging_from_files`), which recomputes the staging file
+from scratch and updates `host_dirty` accordingly. There's no mtime/stat fast-path like
+git's - the config files here are small enough that a full content diff on every call is
+cheap - so the baseline is just read and diffed directly.
 
 ### State tracker
 
@@ -133,13 +140,12 @@ c2sync/
 |   |   └── test_[...].py
 |   |
 │   ├── __init__.py
-│   ├── diff_engine.py
-│   ├── git_ops.py
+│   ├── connector.py
+│   ├── differ.py
+│   ├── exceptions.py
 │   ├── main.py
 │   ├── models.py
-│   ├── serial_interface.py
-│   ├── state_engine.py
-│   └── watcher.py
+│   └── state_engine.py
 │
 ├── pyproject.toml
 ├── README.md

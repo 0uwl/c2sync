@@ -23,7 +23,7 @@ def test_differ_applies_to_mock_device(mock_device):
     differ = Differ(PROJECT)
 
     # Generate commands
-    differ.save_to_staging(old_config, new_config)
+    differ.refresh_staging(old_config, new_config)
 
     # Read staged commands
     with open(PROJECT.STAGING_FILE) as f:
