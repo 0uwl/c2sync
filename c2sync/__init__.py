@@ -9,6 +9,7 @@ LOGGER = logging.getLogger(__name__)
 APP_CONFIG_NAME = 'c2sync.config'
 DEVICE_CONFIG_NAME = 'device.config'
 STAGING_FILE_NAME = 'staging.txt'
+STATE_FILE_NAME = 'state.json'
 PROJECT_ROOT = './.c2sync'
 
 @dataclass
@@ -21,6 +22,7 @@ class Project:
     EDIT_FILE: str = os.path.join(PROJECT_DIR, DEVICE_CONFIG_NAME)
     PROMPT_REGEX: str = r'[>#]\s?$'
     STAGING_FILE: str = os.path.join(PROJECT_DIR, STAGING_FILE_NAME)
+    STATE_FILE: str = os.path.join(PROJECT_DIR, STATE_FILE_NAME)
 
     def to_dict(self):
         return {
@@ -30,7 +32,8 @@ class Project:
         'PROJECT_DIR': self.PROJECT_DIR,
         'EDIT_FILE': self.EDIT_FILE,
         'PROMPT_REGEX': self.PROMPT_REGEX,
-        'STAGING_FILE': self.STAGING_FILE
+        'STAGING_FILE': self.STAGING_FILE,
+        'STATE_FILE': self.STATE_FILE
     }
 
 
@@ -46,6 +49,9 @@ def init_project(project_config: Project):
 
     open(project_config.EDIT_FILE, 'w').close()
     open(project_config.STAGING_FILE, 'w').close()
+
+    with open(project_config.STATE_FILE, 'w') as state_file:
+        json.dump({'host_dirty': False, 'device_dirty': False}, state_file)
 
     LOGGER.info(f'Created project')
     print('C2Sync project initialized')

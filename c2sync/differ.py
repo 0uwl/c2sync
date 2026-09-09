@@ -18,17 +18,25 @@ class Differ:
         self.staging_file = project.STAGING_FILE
 
 
-    def save_to_staging(self, old_lines: List[str], new_lines: List[str]) -> None:
+    def save_to_staging(self, old_lines: List[str], new_lines: List[str]) -> bool:
         """
         Generate CLI command blocks from config differences and append them
         to the staging file.
+
+        Returns True if any commands were staged, False if the edit didn't
+        introduce any changes.
         """
         blocks = self._build_command_blocks(old_lines, new_lines)
+
+        if not blocks:
+            return False
 
         with open(self.staging_file, 'a') as file:
             for block in blocks:
                 # Convert structured block into CLI lines
                 file.write("\n".join(block.to_lines()) + "\n")
+
+        return True
 
 
     def clear_staging(self) -> None:

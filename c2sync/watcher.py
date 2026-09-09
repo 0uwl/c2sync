@@ -5,6 +5,7 @@ from watchdog.events import DirModifiedEvent, FileModifiedEvent, FileSystemEvent
 
 from c2sync import Project
 from c2sync.differ import Differ
+from c2sync.state_engine import StateEngine
 
 LOGGER = logging.getLogger(__name__)
 
@@ -12,19 +13,22 @@ class ConfigWatcher(FileSystemEventHandler):
     def __init__(self, project: Project) -> None:
         self.filepath = project.EDIT_FILE
         self.differ = Differ(project)
+        self.state_engine = StateEngine(project)
         self.last_content = self.read_file()
 
 
     def read_file(self) -> list[str]:
         with open(self.filepath, 'r') as file:
             return file.readlines()
-            
-    
+
+
     def on_modified(self, event: DirModifiedEvent | FileModifiedEvent) -> None:
         if event.src_path != self.filepath:
             return
 
         old_content = self.last_content
         new_content = self.read_file()
+        self.last_content = new_content
 
-        self.differ.save_to_staging(old_content, new_content)
+        if self.differ.save_to_staging(old_content, new_content):
+            self.state_engine.mark_host_dirty()
