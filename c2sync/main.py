@@ -1,10 +1,11 @@
 import getpass
 import logging
+import os
 import sys
 
 from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutException
 
-from c2sync import Project, get_project, init_project
+from c2sync import Project, get_project, git_ops, init_project
 from c2sync.connector import SerialInterface
 from c2sync.differ import Differ
 from c2sync.exceptions import ConfigApplyError, ConfigSaveError
@@ -116,14 +117,15 @@ def sync(arguments: list):
     state_engine.mark_host_clean()
     state_engine.mark_device_dirty()
 
-    # The device is now the source of truth again - refresh both the file
-    # the user edits and the baseline we diff it against next time, exactly
-    # the way `git commit` advances what HEAD (and the index) point to.
+    # The device is now the source of truth again - refresh the file the
+    # user edits and commit it, so git HEAD (the baseline we diff against
+    # next time) advances the way a `git commit` advances the index.
     new_config = interface.get_running_config()
     with open(project.EDIT_FILE, 'w') as file:
         file.write(new_config)
-    with open(project.BASELINE_FILE, 'w') as file:
-        file.write(new_config)
+
+    edit_file_name = os.path.relpath(project.EDIT_FILE, project.PROJECT_DIR)
+    git_ops.commit(project.PROJECT_DIR, [edit_file_name], f'c2sync sync: pushed to {project.SERIAL_DEVICE}')
 
     interface.disconnect()
     print('\nSynced. Device has pending changes not yet saved to startup-config (run `c2sync commit`).')
@@ -159,6 +161,7 @@ def commit(arguments: list):
         sys.exit(1)
 
     state_engine.mark_device_clean()
+    git_ops.commit_empty(project.PROJECT_DIR, f'c2sync commit: saved to startup-config on {project.SERIAL_DEVICE}')
     interface.disconnect()
     print('\nSaved. Device is now synced.')
 
@@ -171,8 +174,8 @@ def discard(arguments: list):
     # Revert the edit file itself, not just the staging file - otherwise
     # the discarded edits would just get re-staged the next time status/sync
     # recomputes the diff against the baseline.
-    with open(project.BASELINE_FILE) as file:
-        baseline = file.read()
+    edit_file_name = os.path.relpath(project.EDIT_FILE, project.PROJECT_DIR)
+    baseline = git_ops.show_at_head(project.PROJECT_DIR, edit_file_name) or ''
     with open(project.EDIT_FILE, 'w') as file:
         file.write(baseline)
 

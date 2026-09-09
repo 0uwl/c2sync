@@ -1,6 +1,7 @@
-from c2sync import Project
+from c2sync import Project, git_ops
 import logging
 import difflib
+import os
 from typing import List
 
 from c2sync.models import Addition, Command, CommandBlock
@@ -46,11 +47,13 @@ class Differ:
 
     def refresh_staging_from_files(self) -> bool:
         """
-        Same as refresh_staging, but reads the baseline and current config
-        straight from the project's BASELINE_FILE and EDIT_FILE.
+        Same as refresh_staging, but reads the baseline from git HEAD (the
+        last confirmed sync) and the current config from the project's
+        EDIT_FILE.
         """
-        with open(self.project.BASELINE_FILE) as file:
-            baseline_lines = file.readlines()
+        edit_file_name = os.path.relpath(self.project.EDIT_FILE, self.project.PROJECT_DIR)
+        baseline = git_ops.show_at_head(self.project.PROJECT_DIR, edit_file_name) or ''
+        baseline_lines = baseline.splitlines(keepends=True)
 
         with open(self.project.EDIT_FILE) as file:
             current_lines = file.readlines()

@@ -155,7 +155,7 @@ def test_commit_saves_and_marks_device_clean(project):
 # ------------------------------------------------------------------
 
 def test_discard_reverts_edit_file_to_baseline(project):
-    with open(project.BASELINE_FILE) as file:
+    with open(project.EDIT_FILE) as file:
         baseline = file.read()
 
     _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
