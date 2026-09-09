@@ -187,6 +187,18 @@ C2Sync is Cisco IOS only today. Supporting another vendor means more than swappi
 * **NX-OS** — the more realistic near-term target. `ciscoconfparse2`'s diff engine (`hier_config`) already treats `nxos` as a first-class syntax rather than a fallback, and NX-OS keeps the same running-config/startup-config duality as IOS classic, so C2Sync's `sync`-then-`commit` model and state tracking would carry over largely unchanged. Would still need `device_type='cisco_nxos'`, plus NX-OS-specific error/save-confirmation patterns in `connector.py` — its "invalid command" and `copy run start` output wording differs from classic IOS.
 * **JunOS** — a bigger lift. `ciscoconfparse2` parses JunOS config into a correct tree, but its diff/remediation engine currently falls back to IOS rules for `syntax='junos'` rather than real JunOS logic, and produces invalid syntax (`no set ...` instead of JunOS's `delete ...`). JunOS's candidate/commit model also has no separate running-vs-startup-config step the way IOS does, so the `sync`/`commit` split and `state_engine.py`'s dirty-state tracking would need real rework, not just a new device type.
 
+### Pushing to a remote
+
+Considered, and deliberately not built: auto-pushing the project's git repo to a remote after a confirmed `sync`/`commit`. Git already solves this better than C2Sync could — add a `post-commit` hook and every commit C2Sync makes gets mirrored automatically, with no new credential surface (it reuses whatever git push auth you already have set up) and no risk of a push failure ever affecting a device push that already succeeded:
+
+```bash
+cat > .c2sync/.git/hooks/post-commit <<'EOF'
+#!/bin/sh
+git push
+EOF
+chmod +x .c2sync/.git/hooks/post-commit
+```
+
 ## Disclaimer
 * This tool assumes familiarity with network device CLI. You must adhere to Cisco IOS' configuration syntax
 * The tool does not validate commands before sending. You must review the preview yourself before confirming a `sync`
