@@ -1,12 +1,10 @@
 import pytest
-import shutil
 from pathlib import Path
 
-from c2sync import init_project
 from c2sync.differ import Differ
-from c2sync.models import Addition, Command, CommandBlock
 
 from constants import PROJECT
+
 # ------------------------------------------------------------------
 # Fixtures
 # ------------------------------------------------------------------
@@ -18,174 +16,25 @@ def differ():
     """
     return Differ(PROJECT)
 
-# ------------------------------------------------------------------
-# Test: _extract_additions
-# ------------------------------------------------------------------
-
-def test_extract_additions_basic(differ):
-    old = [
-        "hostname Router1",
-    ]
-
-    new = [
-        "hostname Router1",
-        "interface Gi1/0/1",
-    ]
-
-    additions = differ._extract_additions(old, new)
-
-    assert additions == [
-        Addition(index=1, line="interface Gi1/0/1")
-    ]
-
-
-def test_extract_additions_ignores_empty_lines(differ):
-    old = ["hostname Router1"]
-    new = ["hostname Router1", "   "]
-
-    additions = differ._extract_additions(old, new)
-
-    assert additions == []
-
-
-# ------------------------------------------------------------------
-# Test: _build_commands
-# ------------------------------------------------------------------
-
-def test_build_commands_with_context(differ):
-    new_lines = [
-        "interface Gi1/0/1",
-        " description test",
-    ]
-
-    additions = [
-        Addition(index=1, line=" description test")
-    ]
-
-    commands = differ._build_commands(additions, new_lines)
-
-    assert commands == [
-        Command(
-            context=["interface Gi1/0/1"],
-            action="description test"
-        )
-    ]
-
-
-def test_build_commands_without_context(differ):
-    new_lines = [
-        "hostname Router1",
-    ]
-
-    additions = [
-        Addition(index=0, line="hostname Router1")
-    ]
-
-    commands = differ._build_commands(additions, new_lines)
-
-    assert commands == [
-        Command(
-            context=[],
-            action="hostname Router1"
-        )
-    ]
-
-
-# ------------------------------------------------------------------
-# Test: _group_commands
-# ------------------------------------------------------------------
-
-def test_group_commands_groups_same_context(differ):
-    commands = [
-        Command(["interface Gi1/0/1"], "desc A"),
-        Command(["interface Gi1/0/1"], "shutdown"),
-    ]
-
-    blocks = differ._group_commands_by_context(commands)
-
-    assert blocks == [
-        CommandBlock(
-            context=["interface Gi1/0/1"],
-            actions=["desc A", "shutdown"]
-        )
-    ]
-
-
-def test_group_commands_separates_different_contexts(differ):
-    commands = [
-        Command(["interface Gi1/0/1"], "desc A"),
-        Command(["router ospf 1"], "network 10.0.0.0 0.0.0.255 area 0"),
-    ]
-
-    blocks = differ._group_commands_by_context(commands)
-
-    assert len(blocks) == 2
-
-    assert CommandBlock(
-        context=["interface Gi1/0/1"],
-        actions=["desc A"]
-    ) in blocks
-
-    assert CommandBlock(
-        context=["router ospf 1"],
-        actions=["network 10.0.0.0 0.0.0.255 area 0"]
-    ) in blocks
-
-
-# ------------------------------------------------------------------
-# Test: End-to-End Pipeline
-# ------------------------------------------------------------------
-
-def test_build_command_blocks_end_to_end(differ):
-    old = [
-        "interface Gi1/0/1",
-        " description old",
-    ]
-
-    new = [
-        "interface Gi1/0/1",
-        " description old",
-        " shutdown",
-    ]
-
-    blocks = differ._build_command_blocks(old, new)
-
-    assert blocks == [
-        CommandBlock(
-            context=["interface Gi1/0/1"],
-            actions=["shutdown"]
-        )
-    ]
-
 
 # ------------------------------------------------------------------
 # Test: refresh_staging
 # ------------------------------------------------------------------
 
-def test_refresh_staging_writes_correct_output(differ):
-    old = [
-        "interface Gi1/0/1",
-    ]
-
-    new = [
-        "interface Gi1/0/1",
-        " shutdown",
-    ]
+def test_refresh_staging_stages_additions_with_context(differ):
+    old = "interface Gi1/0/1\n"
+    new = "interface Gi1/0/1\n shutdown\n"
 
     staged = differ.refresh_staging(old, new)
 
     assert staged is True
-
-    content = Path(differ.staging_file).read_text().strip()
-
-    assert content == "\n".join([
-        "interface Gi1/0/1",
-        "shutdown"
-    ])
+    content = Path(differ.staging_file).read_text()
+    assert "interface Gi1/0/1" in content
+    assert "shutdown" in content
 
 
 def test_refresh_staging_returns_false_when_nothing_changed(differ):
-    same = ["interface Gi1/0/1"]
+    same = "interface Gi1/0/1\n description X\n"
 
     staged = differ.refresh_staging(same, same)
 
@@ -200,15 +49,49 @@ def test_refresh_staging_overwrites_rather_than_appends(differ):
     user keeps editing) replaces the previous result instead of piling on
     top of it.
     """
-    old = ["interface Gi1/0/1"]
+    old = "interface Gi1/0/1\n"
 
-    differ.refresh_staging(old, ["interface Gi1/0/1", " shutdown"])
-    differ.refresh_staging(old, ["interface Gi1/0/1", " description test"])
+    differ.refresh_staging(old, "interface Gi1/0/1\n shutdown\n")
+    differ.refresh_staging(old, "interface Gi1/0/1\n description test\n")
 
     content = Path(differ.staging_file).read_text()
 
     assert "shutdown" not in content
     assert "description test" in content
+
+
+def test_refresh_staging_stages_a_real_no_command_for_deleted_lines(differ):
+    """
+    The headline reason for switching to ciscoconfparse2: a line that's
+    just deleted (not manually replaced with `no ...`) now produces a real
+    negation command, instead of being silently dropped.
+    """
+    old = "interface Gi1/0/1\n description Server\n switchport mode access\n"
+    new = "interface Gi1/0/1\n switchport mode access\n"
+
+    staged = differ.refresh_staging(old, new)
+
+    assert staged is True
+    content = Path(differ.staging_file).read_text()
+    assert "no description Server" in content
+
+
+def test_refresh_staging_ignores_unchanged_multiline_block(differ):
+    """
+    Multi-line blocks (banners, macros) are treated as opaque - an
+    unrelated change elsewhere doesn't cause the block to be re-diffed
+    line by line.
+    """
+    banner = "banner motd ^C\nWelcome\n^C\n"
+    old = banner + "interface Gi1/0/1\n description A\n"
+    new = banner + "interface Gi1/0/1\n description A2\n"
+
+    staged = differ.refresh_staging(old, new)
+
+    assert staged is True
+    content = Path(differ.staging_file).read_text()
+    assert "banner" not in content
+    assert "description A2" in content
 
 
 # ------------------------------------------------------------------

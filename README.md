@@ -1,23 +1,23 @@
-## C2Sync – Console Configuration Synchronizer
+## C2Sync – CLI Config Synchronizer
 
 ## Overview
 
-C2Sync is a Python-based CLI tool that acts as a **middleman between a Cisco IOS device (over console/serial) and a local git repository**.
+C2Sync is a Python-based CLI tool that acts as a **middleman between a Cisco IOS device (over serial console or SSH) and a local git repository**.
 
 The tool lets you:
 
 * Track a device's running configuration in a local git repository
 * Edit the configuration locally using the text editor of your choice (e.g. VS Code)
-* Rebuild the Cisco IOS configuration context structure through a simple indentation-based algorithm
-* Push changes back to the device over the serial connection, verified against the device's own response before anything is considered synced
+* Diff your edits against a real Cisco IOS configuration tree, including deletions, not just added lines
+* Push changes back to the device over serial or SSH, verified against the device's own response before anything is considered synced
 * Save the running configuration to the startup configuration
 
-Console-only, Cisco IOS only, one device per project — a deliberate starting scope, not an oversight. SSH transport and multi-vendor support are designed-for future extensions, not current scope.
+Cisco IOS only, one device per project — a deliberate starting scope, not an oversight. Multi-vendor support is a possible future direction, not current scope (see Potential Future Features below).
 
 ## Core Design Principles
 
 * Focus on simplicity, reliability, and CLI correctness
-* Simplify the experience of managing device config over a console connection
+* Simplify the experience of managing device config over serial or SSH
 * Every project is a real git repository — c2sync commits at defined lifecycle points (confirmed sync/commit), but doesn't reimplement `diff`/`log`/`branch`/PR review. Use your normal git tooling directly against the project directory, and push it to GitHub/GitLab for review like any other repo
 * Users should already be comfortable with Cisco IOS CLI syntax
 
@@ -38,7 +38,7 @@ Not published to PyPI yet — install from a checkout of this repository:
 pip install -e .
 ```
 
-Requires Python 3.11+ (for reading the optional global config file, see Configuration below) and a real or mocked serial connection for anything beyond `init`/`status`/`discard` — `pull`/`sync`/`commit` all need to reach the device.
+Requires Python 3.11+ (for reading the optional global config file, see Configuration below) and a real or mocked device connection for anything beyond `init`/`status`/`discard` — `pull`/`sync`/`commit` all need to reach the device, over serial or SSH.
 
 ## Usage
 ### CLI Commands
@@ -46,7 +46,8 @@ Requires Python 3.11+ (for reading the optional global config file, see Configur
 c2sync COMMAND
 
 Commands:
-  init      SERIAL_DEVICE [BAUDRATE]  Start a project for one device in the current directory
+  init      SERIAL_DEVICE [BAUDRATE]  Start a project for one device over serial
+  init      --ssh HOST [PORT]         Start a project for one device over SSH
   pull      [-y]                      Fetch the device's running config and make it the new baseline
   status                              Show whether there are unsynced local edits or an unsaved device change
   sync      [-y]                      Preview and push staged changes to the device
@@ -60,11 +61,13 @@ Commands:
 
 ```
 c2sync init SERIAL_DEVICE [BAUDRATE]
+c2sync init --ssh HOST [PORT]
 ```
 Behavior:
-* Creates a new project in the current working directory (`./.c2sync/`)
+* Creates a new project in the current working directory (`./.c2sync/`) for one device, reached over serial or SSH
 * Initializes a git repository there and makes the first commit (an empty `device.config`)
-* `BAUDRATE` defaults to 9600, or to the global config's `baudrate` if set (see Configuration below)
+* Serial: `BAUDRATE` defaults to 9600, or to the global config's `baudrate` if set (see Configuration below)
+* SSH: `PORT` defaults to 22, or to the global config's `ssh_port` if set
 
 ### 2. Pull
 
@@ -78,9 +81,9 @@ Behavior:
 
 ### 3. Local Editing
 
-The user edits `./.c2sync/device.config` with the text editor of their choice. When editing the file, the user should still adhere to the rules of Cisco IOS CLI configuration. This means that to delete a line, simply removing it from the file will not work — deletions are not detected at all today. Instead, do as you would in the CLI and add a negation command (`no ...`). If a line is just deleted, it's silently ignored, and the next time the config is pulled from the device, the line will reappear.
+The user edits `./.c2sync/device.config` with the text editor of their choice, using normal Cisco IOS CLI syntax. Just delete a line to remove it — C2Sync parses the config into a real tree (via `ciscoconfparse2`) and generates the correct `no <command>` for you; you don't need to type the negation yourself, though it still works fine if you do.
 
-When `status`/`sync` recompute staging, C2Sync rebuilds the configuration context to produce the exact commands that would be sent, written to `./.c2sync/staging.txt`.
+When `status`/`sync` recompute staging, C2Sync diffs the parsed tree against the last confirmed baseline and writes the exact commands that would be sent to `./.c2sync/staging.txt`.
 
 Example:
 ```
@@ -89,15 +92,14 @@ interface GigabitEthernet1/0/1
  switchport mode access
  switchport access vlan 100
 ```
-To remove the description and disable link negotiation with C2Sync, you edit this interface like this:
+To remove the description and disable link negotiation, just edit the interface like this:
 ```
 interface GigabitEthernet1/0/1
- no description Server
  switchport mode access
  switchport access vlan 100
  switchport nonegotiate
 ```
-C2Sync diffs the original against the changed file and picks up the added/changed lines. Cisco IOS configurations have hierarchical context that must be included alongside the changed lines, so C2Sync rebuilds it by walking upward through the file until it reaches a line with less leading whitespace. The resulting staged commands look like this:
+C2Sync stages exactly the commands needed to make that change, with the interface context included once:
 ```
 interface GigabitEthernet1/0/1
  no description Server
@@ -110,9 +112,6 @@ interface GigabitEthernet1/0/1
  switchport access vlan 100
  switchport nonegotiate
 ```
-
-> [!NOTE]
-> _This means that you must be mindful of spaces to declare contexts properly_
 
 ### 4. Status
 
@@ -170,11 +169,35 @@ An optional TOML file at `~/.config/c2sync/config.toml` (or `$XDG_CONFIG_HOME/c2
 ```toml
 username = "admin"
 baudrate = 115200
+ssh_port = 22
 timeout = 600
 prompt_regex = '[>#]\s?$'
 ```
 
 Every key is optional and already has a working default without this file. Passwords and enable-secrets are intentionally never stored here — see Credentials above.
+
+## Potential Future Features
+
+Ideas that have come up but aren't built or scheduled — see `CLAUDE.md`'s Roadmap for what's actually in progress.
+
+### Multi-vendor support
+
+C2Sync is Cisco IOS only today. Supporting another vendor means more than swapping Netmiko's `device_type` — the diff engine and the device's own workflow both matter:
+
+* **NX-OS** — the more realistic near-term target. `ciscoconfparse2`'s diff engine (`hier_config`) already treats `nxos` as a first-class syntax rather than a fallback, and NX-OS keeps the same running-config/startup-config duality as IOS classic, so C2Sync's `sync`-then-`commit` model and state tracking would carry over largely unchanged. Would still need `device_type='cisco_nxos'`, plus NX-OS-specific error/save-confirmation patterns in `connector.py` — its "invalid command" and `copy run start` output wording differs from classic IOS.
+* **JunOS** — a bigger lift. `ciscoconfparse2` parses JunOS config into a correct tree, but its diff/remediation engine currently falls back to IOS rules for `syntax='junos'` rather than real JunOS logic, and produces invalid syntax (`no set ...` instead of JunOS's `delete ...`). JunOS's candidate/commit model also has no separate running-vs-startup-config step the way IOS does, so the `sync`/`commit` split and `state_engine.py`'s dirty-state tracking would need real rework, not just a new device type.
+
+### Pushing to a remote
+
+Considered, and deliberately not built: auto-pushing the project's git repo to a remote after a confirmed `sync`/`commit`. Git already solves this better than C2Sync could — add a `post-commit` hook and every commit C2Sync makes gets mirrored automatically, with no new credential surface (it reuses whatever git push auth you already have set up) and no risk of a push failure ever affecting a device push that already succeeded:
+
+```bash
+cat > .c2sync/.git/hooks/post-commit <<'EOF'
+#!/bin/sh
+git push
+EOF
+chmod +x .c2sync/.git/hooks/post-commit
+```
 
 ## Disclaimer
 * This tool assumes familiarity with network device CLI. You must adhere to Cisco IOS' configuration syntax

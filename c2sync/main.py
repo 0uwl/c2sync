@@ -6,7 +6,7 @@ import sys
 from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutException
 
 from c2sync import Project, get_project, git_ops, init_project, user_config
-from c2sync.connector import SerialInterface
+from c2sync.connector import DeviceInterface
 from c2sync.differ import Differ
 from c2sync.exceptions import ConfigApplyError, ConfigSaveError
 from c2sync.state_engine import StateEngine
@@ -58,14 +58,21 @@ def init(arguments: list):
 
     if not arguments:
         print('Usage: c2sync init SERIAL_DEVICE [BAUDRATE]')
+        print('       c2sync init --ssh HOST [PORT]')
         sys.exit(1)
 
     config = user_config.load()
 
-    serial_device = arguments[0]
-    baudrate = int(arguments[1]) if len(arguments) > 1 else config.get('baudrate', 9600)
+    if arguments[0] == '--ssh':
+        if len(arguments) < 2:
+            print('Usage: c2sync init --ssh HOST [PORT]')
+            sys.exit(1)
+        port = int(arguments[2]) if len(arguments) > 2 else config.get('ssh_port', 22)
+        project_kwargs = {'TRANSPORT': 'ssh', 'HOST': arguments[1], 'SSH_PORT': port}
+    else:
+        baudrate = int(arguments[1]) if len(arguments) > 1 else config.get('baudrate', 9600)
+        project_kwargs = {'TRANSPORT': 'serial', 'SERIAL_DEVICE': arguments[0], 'BAUDRATE': baudrate}
 
-    project_kwargs = {'SERIAL_DEVICE': serial_device, 'BAUDRATE': baudrate}
     if 'timeout' in config:
         project_kwargs['TIMEOUT'] = config['timeout']
     if 'prompt_regex' in config:
@@ -102,7 +109,7 @@ def pull(arguments: list):
         file.write(new_config)
 
     edit_file_name = os.path.relpath(project.EDIT_FILE, project.PROJECT_DIR)
-    git_ops.commit(project.PROJECT_DIR, [edit_file_name], f'c2sync pull: fetched from {project.SERIAL_DEVICE}')
+    git_ops.commit(project.PROJECT_DIR, [edit_file_name], f'c2sync pull: fetched from {project.target}')
 
     Differ(project).clear_staging()
     StateEngine(project).mark_host_clean()
@@ -171,7 +178,7 @@ def sync(arguments: list):
         file.write(new_config)
 
     edit_file_name = os.path.relpath(project.EDIT_FILE, project.PROJECT_DIR)
-    git_ops.commit(project.PROJECT_DIR, [edit_file_name], f'c2sync sync: pushed to {project.SERIAL_DEVICE}')
+    git_ops.commit(project.PROJECT_DIR, [edit_file_name], f'c2sync sync: pushed to {project.target}')
 
     interface.disconnect()
     print('\nSynced. Device has pending changes not yet saved to startup-config (run `c2sync commit`).')
@@ -207,7 +214,7 @@ def commit(arguments: list):
         sys.exit(1)
 
     state_engine.mark_device_clean()
-    git_ops.commit_empty(project.PROJECT_DIR, f'c2sync commit: saved to startup-config on {project.SERIAL_DEVICE}')
+    git_ops.commit_empty(project.PROJECT_DIR, f'c2sync commit: saved to startup-config on {project.target}')
     interface.disconnect()
     print('\nSaved. Device is now synced.')
 
@@ -259,7 +266,7 @@ def _confirm(prompt: str) -> bool:
     return input(f'{prompt} [y/N] ').strip().lower() == 'y'
 
 
-def _connect(project: Project) -> SerialInterface:
+def _connect(project: Project) -> DeviceInterface:
     # Username is not a secret, so it can also come from the user's global
     # config (~/.config/c2sync/config.toml) - password/secret never do, only
     # the env vars below or an interactive prompt.
@@ -279,7 +286,7 @@ def _connect(project: Project) -> SerialInterface:
         secret = getpass.getpass('Enable secret (leave blank if none): ') or None
 
     try:
-        interface = SerialInterface(project, username=username, password=password, secret=secret)
+        interface = DeviceInterface(project, username=username, password=password, secret=secret)
         interface.initialize_session()
         return interface
     except (NetmikoAuthenticationException, NetmikoTimeoutException) as e:

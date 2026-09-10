@@ -121,6 +121,28 @@ def test_init_cli_baudrate_overrides_global_config(tmp_path, monkeypatch):
     assert get_project().BAUDRATE == 57600
 
 
+def test_init_ssh_creates_an_ssh_transport_project(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
+
+    main_module.init(['--ssh', '10.0.0.1', '2222'])
+
+    project = get_project()
+    assert project.TRANSPORT == 'ssh'
+    assert project.HOST == '10.0.0.1'
+    assert project.SSH_PORT == 2222
+    assert project.target == '10.0.0.1'
+
+
+def test_init_ssh_defaults_port_to_22(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
+
+    main_module.init(['--ssh', '10.0.0.1'])
+
+    assert get_project().SSH_PORT == 22
+
+
 # ------------------------------------------------------------------
 # pull
 # ------------------------------------------------------------------

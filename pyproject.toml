@@ -1,7 +1,7 @@
 [project]
 name = "c2sync"
 version = "0.1.0"
-description = "Console Config Sync tool for network devices"
+description = "CLI config sync tool for network devices"
 authors = [
   { name="0uwl", email="ouwl.person@proton.me" }
 ]
@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 
 dependencies = [
   "netmiko",
+  "ciscoconfparse2",
   "pytest"
 ]
 
