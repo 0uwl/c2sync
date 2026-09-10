@@ -86,19 +86,37 @@ of anything staged. Read-only, and never connects to the device.
 """,
 
     'push': """
-Usage: c2sync push [-y] [--rollback-on-error]
+Usage: c2sync push [-y] [--force|-f] [--rollback-on-error]
 
 Preview the staged commands and push them to the device.
 
-Shows the exact CLI commands that will be sent and asks for confirmation.
-Once the device confirms the push, C2Sync re-fetches the running config,
-writes it to device.config, and commits it, advancing the baseline.
+Reads the device's running config first and checks it still matches the
+baseline the staged commands were computed against, then shows the exact
+CLI commands that will be sent and asks for confirmation. Once the device
+confirms the push, C2Sync re-fetches the running config, writes it to
+device.config, and commits it, advancing the baseline.
 
 Options:
   -y                    Skip the confirmation prompt.
+  --force, -f           Adopt out-of-band device changes without asking.
   --rollback-on-error   If the device rejects a command after earlier ones
                         already applied, offer to undo them by pushing the
                         device back to the pre-push baseline.
+
+If the device was changed outside C2Sync since the last push, the staged
+commands describe a device that no longer exists -- a line you deleted
+locally still becomes `no <that line>` and can destroy someone else's
+replacement for it, with nothing in the preview hinting at it. So push
+checks first and stops, showing what changed on the device. Accepting
+adopts the device's current config as the new baseline (your edits in
+device.config are left alone) and recomputes, so the preview you approve is
+the truth. The recomputed commands will include undoing those out-of-band
+changes, since your file does not contain them -- that is the point: it
+happens either way, and this is the version where you see it first.
+
+-y does not stand in for that decision, and never prompts for it: with -y
+and no --force, drift is a hard failure, so a CI job stops instead of
+pushing against a stale baseline.
 
 A command the device rejects aborts the batch, and the commands before it
 stay on the device. C2Sync always re-reads the running config at that point
@@ -309,7 +327,11 @@ def status(arguments: list):
 
 def push(arguments: list):
     LOGGER.debug(f'Given arguments: {arguments}')
-    force = '-y' in arguments
+    assume_yes = '-y' in arguments
+    # Deliberately not the same flag as -y: -y means "don't ask me to
+    # confirm my own commands", never "silently overwrite changes someone
+    # else made to the device".
+    force = '--force' in arguments or '-f' in arguments
     rollback_on_error = '--rollback-on-error' in arguments
 
     project = _require_project()
@@ -319,32 +341,42 @@ def push(arguments: list):
         print('Nothing staged to push.')
         return
 
-    print('The following commands will be sent to the device:\n')
-    for line in lines:
-        print(f'  {line}')
-
-    if not force and not _confirm('\nProceed?'):
-        print('Aborted.')
-        return
-
     state_engine = StateEngine(project)
 
-    # Captured before anything is pushed: if the push aborts partway and
-    # --rollback-on-error is set, this is the state to put the device back
-    # to. Reconciliation advances HEAD, so it can't be looked up as 'HEAD'
-    # after the fact.
-    try:
-        pre_push_head = git_ops.resolve_rev(project.PROJECT_DIR, 'HEAD')
-    except git_ops.GitError:
-        pre_push_head = None
-
     with _connected(project) as interface:
+        # The staged commands so far were computed offline, against the
+        # baseline. Check that against the device before showing a preview
+        # anyone is asked to approve - otherwise the preview describes a
+        # device that may not exist any more. See the helper for why.
+        lines = _reconcile_out_of_band_drift(project, interface, lines, assume_yes, force)
+
+        if not lines:
+            print('\nYour edits are already on the device - nothing left to push.')
+            return
+
+        print('The following commands will be sent to the device:\n')
+        for line in lines:
+            print(f'  {line}')
+
+        if not assume_yes and not _confirm('\nProceed?'):
+            print('Aborted.')
+            return
+
+        # Captured after any drift was adopted, so it names what the device
+        # actually had immediately before this push - which is what a
+        # rollback has to return it to. Reconciliation advances HEAD, so it
+        # can't be looked up as 'HEAD' after the fact.
+        try:
+            pre_push_head = git_ops.resolve_rev(project.PROJECT_DIR, 'HEAD')
+        except git_ops.GitError:
+            pre_push_head = None
+
         try:
             interface.apply_config(lines)
         except ConfigApplyError as e:
             landed = _reconcile_after_failed_push(project, interface, state_engine, e)
             if landed and rollback_on_error:
-                _rollback_after_failed_push(project, interface, state_engine, pre_push_head, force)
+                _rollback_after_failed_push(project, interface, state_engine, pre_push_head, assume_yes)
             # Recompute staging against the baseline reconciliation just
             # moved, so the state left behind is honest about what is still
             # outstanding.
@@ -515,6 +547,70 @@ def revert(arguments: list):
     state_engine.mark_device_dirty()
 
     print('\nReverted. Device has pending changes not yet saved to startup-config (run `c2sync save`).')
+
+
+def _reconcile_out_of_band_drift(
+    project: Project, interface, lines: list[str], assume_yes: bool, force: bool,
+) -> list[str]:
+    """
+    Verify the device still matches the baseline the staged commands were
+    computed against, and return the commands to actually push.
+
+    Everything up to this point is computed offline - `_refresh_staging()`
+    diffs EDIT_FILE against `device.config` at git HEAD and never reads the
+    device. If someone changed the device out-of-band (another operator on
+    the console, another tool), that baseline no longer describes it and
+    the preview is a description of a device that no longer exists.
+    Deletions are the sharp edge, because negations are generated from the
+    *baseline's* content: a `description Server` you deleted locally
+    becomes `no description Server` and silently destroys the colleague's
+    `description Core-Uplink` that replaced it, with nothing in the preview
+    hinting at it. This is `git push` without a fetch, and the fix is the
+    one git uses - check first, and refuse to push over a moved target.
+
+    Drift is detected with a tree diff rather than string equality, so
+    formatting noise in `show running-config` is not mistaken for a change.
+
+    On drift, adopting the live config as the new baseline (via
+    `git_ops.commit_content`, which leaves EDIT_FILE alone) and recomputing
+    keeps the user's edits *and* makes the resulting preview honest. Note
+    the recomputed commands will include undoing the out-of-band changes,
+    since EDIT_FILE does not contain them - that is the point: it happens
+    either way, and this is the version where the user sees it first.
+    """
+    baseline = git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) or ''
+    live = interface.get_running_config()
+
+    drift = Differ.diff_lines(baseline, live)
+    if not drift:
+        return lines
+
+    print('\nThe device has changed outside C2Sync since the last push, so the staged\n'
+          'commands were computed against a baseline that no longer describes it.\n')
+    print('Changed on the device, not by you:\n')
+    for line in drift:
+        print(f'  {line}')
+
+    if force:
+        print("\n--force: adopting the device's current config as the new baseline.")
+    elif assume_yes:
+        # -y must never stand in for this decision, and prompting here
+        # would hang a CI job on stdin - so fail, loudly and non-zero.
+        print('\nRefusing to push against a stale baseline. Re-run with --force to adopt\n'
+              "the device's current config as the baseline and recompute the commands,\n"
+              'or `c2sync pull --force` to take the device as-is and drop your edits.')
+        sys.exit(1)
+    elif not _confirm("\nAdopt the device's current config as the new baseline and recompute?"):
+        print('Aborted. Nothing was sent to the device.')
+        sys.exit(1)
+
+    git_ops.commit_content(
+        project.PROJECT_DIR, project.edit_file_relpath, live,
+        f'c2sync push: adopted out-of-band changes on {project.target} as the new baseline',
+    )
+
+    print('\nRecomputed against the device\'s current config.')
+    return _refresh_staging(project)
 
 
 def _reconcile_after_failed_push(project: Project, interface, state_engine: StateEngine, error) -> bool:

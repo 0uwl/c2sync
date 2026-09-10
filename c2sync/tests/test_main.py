@@ -24,6 +24,30 @@ def _write(path, lines):
         file.write('\n'.join(lines) + '\n')
 
 
+def _device_mock(config_after_push, config_before_push=''):
+    """
+    A mock that answers `show running-config` with the device's *current*
+    state rather than one fixed string.
+
+    push reads the device before sending anything (the out-of-band drift
+    check), so a mock that always returns the post-push config would make
+    every push look like the device had drifted. Starts at
+    config_before_push - '' being a freshly-init'd project's empty baseline
+    - and switches to config_after_push once commands are applied.
+    """
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    state = {'config': config_before_push}
+
+    def _apply(lines, **kwargs):
+        state['config'] = config_after_push
+        return 'ok'
+
+    mock_conn.send_config_set.side_effect = _apply
+    mock_conn.send_command.side_effect = lambda *args, **kwargs: state['config']
+    return mock_conn
+
+
 def _mocked_connect(mock_conn):
     return (
         patch('c2sync.connector.ConnectHandler', return_value=mock_conn),
@@ -42,10 +66,7 @@ def test_connect_uses_env_credentials_without_prompting(project, monkeypatch):
     monkeypatch.setenv('C2SYNC_USERNAME', 'admin')
     monkeypatch.setenv('C2SYNC_PASSWORD', 'pw')
 
-    mock_conn = MagicMock()
-    mock_conn.check_enable_mode.return_value = True
-    mock_conn.send_config_set.return_value = 'interface Gi1/0/1\n shutdown\nend'
-    mock_conn.send_command.return_value = 'interface Gi1/0/1\n shutdown\n!'
+    mock_conn = _device_mock('interface Gi1/0/1\n shutdown\n!')
 
     def _fail_if_prompted(*args, **kwargs):
         raise AssertionError('should not prompt when both env vars are set')
@@ -64,10 +85,7 @@ def test_connect_falls_back_to_prompt_when_env_partially_set(project, monkeypatc
     monkeypatch.setenv('C2SYNC_USERNAME', 'admin')
     monkeypatch.delenv('C2SYNC_PASSWORD', raising=False)
 
-    mock_conn = MagicMock()
-    mock_conn.check_enable_mode.return_value = True
-    mock_conn.send_config_set.return_value = 'interface Gi1/0/1\n shutdown\nend'
-    mock_conn.send_command.return_value = 'interface Gi1/0/1\n shutdown\n!'
+    mock_conn = _device_mock('interface Gi1/0/1\n shutdown\n!')
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
@@ -82,10 +100,7 @@ def test_connect_uses_username_from_global_config(project, monkeypatch):
     monkeypatch.delenv('C2SYNC_USERNAME', raising=False)
     monkeypatch.delenv('C2SYNC_PASSWORD', raising=False)
 
-    mock_conn = MagicMock()
-    mock_conn.check_enable_mode.return_value = True
-    mock_conn.send_config_set.return_value = 'interface Gi1/0/1\n shutdown\nend'
-    mock_conn.send_command.return_value = 'interface Gi1/0/1\n shutdown\n!'
+    mock_conn = _device_mock('interface Gi1/0/1\n shutdown\n!')
 
     def _fail_if_prompted(*args, **kwargs):
         raise AssertionError('should not prompt for username when set in global config')
@@ -295,10 +310,7 @@ def test_status_is_idempotent_across_repeated_calls(project):
 def test_push_pushes_staged_changes_and_updates_baseline(project):
     _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
 
-    mock_conn = MagicMock()
-    mock_conn.check_enable_mode.return_value = True
-    mock_conn.send_config_set.return_value = 'interface Gi1/0/1\n shutdown\nend'
-    mock_conn.send_command.return_value = 'interface Gi1/0/1\n shutdown\n!'
+    mock_conn = _device_mock('interface Gi1/0/1\n shutdown\n!')
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
@@ -332,8 +344,10 @@ def test_push_partial_push_moves_baseline_to_what_actually_landed(project):
 
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
+    # '' is the drift check reading a device that still matches the empty
+    # baseline; partial_live is the reconciliation reading it afterwards.
     mock_conn.send_config_set.side_effect = ConfigInvalidException('bad command')
-    mock_conn.send_command.return_value = partial_live
+    mock_conn.send_command.side_effect = ['', partial_live]
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
@@ -397,7 +411,7 @@ def test_push_does_not_roll_back_without_the_flag(project):
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
     mock_conn.send_config_set.side_effect = ConfigInvalidException('bad command')
-    mock_conn.send_command.return_value = 'interface Gi1/0/1\n shutdown\n!\n'
+    mock_conn.send_command.side_effect = ['', 'interface Gi1/0/1\n shutdown\n!\n']
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
@@ -419,6 +433,7 @@ def test_push_rollback_on_error_pushes_device_back_to_pre_push_baseline(project)
     # First push is rejected; the rollback push that follows succeeds.
     mock_conn.send_config_set.side_effect = [ConfigInvalidException('bad command'), 'ok']
     mock_conn.send_command.side_effect = [
+        baseline_before,   # drift check: device still matches the baseline
         partial_live,      # reconciliation: what actually landed
         partial_live,      # rollback: live config to diff against the baseline
         baseline_before,   # rollback: state after the correction was applied
@@ -447,24 +462,144 @@ def test_push_rollback_on_error_asks_before_pushing_the_correction(project):
     -y skips the push preview; it must not also silently authorise sending
     a second, corrective batch to a device that is already misbehaving.
 
-    Prompt order here is: push confirmation (asked before connecting), the
-    username prompt, then the rollback confirmation - which is the 'n'.
+    Prompt order here is: the username prompt, the push confirmation, then
+    the rollback confirmation - which is the 'n'. The push confirmation now
+    comes after connecting, because the preview can only be computed once
+    the device has been checked for out-of-band drift.
     """
     _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown', ' bogus-command'])
 
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
+    live = 'interface Gi1/0/1\n shutdown\n!\n'
     mock_conn.send_config_set.side_effect = ConfigInvalidException('bad command')
-    mock_conn.send_command.return_value = 'interface Gi1/0/1\n shutdown\n!\n'
+    mock_conn.send_command.side_effect = ['', live, live]
 
     with patch('c2sync.connector.ConnectHandler', return_value=mock_conn), \
-         patch('builtins.input', side_effect=['y', 'admin', 'n']), \
+         patch('builtins.input', side_effect=['admin', 'y', 'n']), \
          patch('getpass.getpass', side_effect=['pw', '']):
         with pytest.raises(SystemExit):
             main_module.push(['--rollback-on-error'])
 
     # Declining the rollback prompt means no correction is sent.
     assert mock_conn.send_config_set.call_count == 1
+
+
+def test_push_detects_out_of_band_change_and_refuses_under_dash_y(project):
+    """
+    The staged commands are computed offline against the baseline, so a
+    device someone else changed makes the preview describe a device that no
+    longer exists. -y must not stand in for approving that.
+    """
+    _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Mine'])
+
+    baseline_before = git_ops.show_at_head(project.PROJECT_DIR, 'device.config')
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    # Someone else changed the description on the console.
+    mock_conn.send_command.return_value = 'interface Gi1/0/1\n description Colleague\n'
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        with pytest.raises(SystemExit) as excinfo:
+            main_module.push(['-y'])
+
+    assert excinfo.value.code == 1
+    mock_conn.send_config_set.assert_not_called()
+    # Nothing was adopted or committed behind the user's back.
+    assert git_ops.show_at_head(project.PROJECT_DIR, 'device.config') == baseline_before
+
+
+def test_push_declining_the_drift_prompt_sends_nothing(project):
+    _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Mine'])
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_command.return_value = 'interface Gi1/0/1\n description Colleague\n'
+
+    with patch('c2sync.connector.ConnectHandler', return_value=mock_conn), \
+         patch('builtins.input', side_effect=['admin', 'n']), \
+         patch('getpass.getpass', side_effect=['pw', '']):
+        with pytest.raises(SystemExit):
+            main_module.push([])
+
+    mock_conn.send_config_set.assert_not_called()
+
+
+def test_push_adopting_drift_recomputes_against_the_live_config(project):
+    """
+    Adopting moves the baseline to the device without touching EDIT_FILE,
+    so the user's edits survive and the recomputed preview is honest about
+    also undoing the out-of-band change.
+    """
+    _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Mine'])
+
+    live = 'interface Gi1/0/1\n description Colleague\n'
+    mock_conn = _device_mock('interface Gi1/0/1\n description Mine\n', config_before_push=live)
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.push(['-y', '--force'])
+
+    pushed = mock_conn.send_config_set.call_args.args[0]
+    # Recomputed against the live device, not the stale baseline.
+    assert any('description Mine' in line for line in pushed)
+
+    # The user's edits were never clobbered by the adoption.
+    with open(project.EDIT_FILE) as file:
+        assert 'description Mine' in file.read()
+
+    # The adoption is visible in history rather than silent.
+    log = git_ops._run(project.PROJECT_DIR, 'log', '--oneline')
+    assert 'adopted out-of-band changes' in log
+
+
+def test_push_does_not_prompt_when_device_matches_baseline(project):
+    """
+    The drift check must be invisible when nothing drifted - no extra
+    prompt, no extra commit.
+    """
+    _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
+    commits_before = git_ops._run(project.PROJECT_DIR, 'rev-list', '--count', 'HEAD').strip()
+
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Mine'])
+
+    mock_conn = _device_mock(
+        'interface Gi1/0/1\n description Mine\n',
+        config_before_push='interface Gi1/0/1\n description Server\n',
+    )
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.push(['-y'])
+
+    commits_after = git_ops._run(project.PROJECT_DIR, 'rev-list', '--count', 'HEAD').strip()
+    # One new commit for the push itself, none for an adoption.
+    assert int(commits_after) == int(commits_before) + 1
+
+
+def test_push_drift_that_already_matches_edits_sends_nothing(project):
+    """
+    Someone else made the same change first: adopting leaves nothing to
+    push, and that is a success, not an error.
+    """
+    _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Mine'])
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_command.return_value = 'interface Gi1/0/1\n description Mine\n'
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.push(['-y', '--force'])
+
+    mock_conn.send_config_set.assert_not_called()
+    assert StateEngine(project).state.host_dirty is False
 
 
 def test_push_with_no_edits_does_not_connect(project):
@@ -533,10 +668,11 @@ def _sync_known_good(project, config_lines):
     (HEAD) revert tests recover back to.
     """
     _write(project.EDIT_FILE, config_lines)
-    mock_conn = MagicMock()
-    mock_conn.check_enable_mode.return_value = True
-    mock_conn.send_config_set.return_value = 'ok'
-    mock_conn.send_command.return_value = '\n'.join(config_lines) + '\n'
+    # Start the mock device at the current baseline, not always empty -
+    # otherwise a second call looks to the drift check like the device was
+    # wiped out-of-band since the first one.
+    current = git_ops.show_at_head(project.PROJECT_DIR, 'device.config') or ''
+    mock_conn = _device_mock('\n'.join(config_lines) + '\n', config_before_push=current)
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:

@@ -311,17 +311,25 @@ Behavior:
 ### 5. Push
 
 ```
-c2sync push [-y] [--rollback-on-error]
+c2sync push [-y] [--force|-f] [--rollback-on-error]
 
 Options:
     -y                   Push without an interactive confirmation prompt
+    --force, -f          Adopt out-of-band device changes without asking
     --rollback-on-error  Offer to undo a partially-applied push
 ```
 Behavior:
+* Reads the device's running config first and checks it still matches the baseline the staged commands were computed against — see below
 * Displays the commands that will be sent, then pushes them if confirmed
 * Re-fetches the running config and commits it to the project's git repository — this becomes the new baseline for the next diff
 * If the device rejects a command partway, the commands before it stay on the device. C2Sync always re-reads the running config at that point and moves the baseline to match, so `status` shows only what's still outstanding and your edits are left alone — it does not undo the push
 * `--rollback-on-error` additionally offers to push the device back to the pre-push baseline. It's opt-in because undoing means sending more config to a device that just rejected some, and a negation isn't always a safe inverse (undoing an address or interface change can cut the session doing it). It previews and asks first unless `-y` is also given
+
+**If the device changed outside C2Sync**, the staged commands describe a device that no longer exists. A line you deleted locally still becomes `no <that line>`, which on IOS clears whatever is actually there — so it can destroy a colleague's replacement for it, with nothing in the preview hinting at that. `push` therefore reads the device before showing you anything, and stops if it has drifted, printing what changed on it.
+
+Accepting adopts the device's current config as the new baseline and recomputes. Your edits in `device.config` are left untouched, the adoption is recorded as a git commit, and the preview you then approve is the truth. The recomputed commands will include undoing the out-of-band change, since your file doesn't contain it — that's the point: it happens either way, and this is the version where you see it first. To keep both sets of changes, merge them with `git` in the project directory before pushing.
+
+`-y` doesn't stand in for that decision and never prompts for it: with `-y` and no `--force`, drift is a hard failure, so a CI job stops rather than pushing against a stale baseline.
 
 ### 6. Save
 

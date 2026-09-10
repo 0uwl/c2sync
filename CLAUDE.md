@@ -38,7 +38,7 @@ c2sync init /dev/ttyUSB0 [BAUDRATE]     # serial transport
 c2sync init --ssh HOST [PORT]           # SSH transport
 c2sync pull [--force|-f]
 c2sync status
-c2sync push [-y] [--rollback-on-error]
+c2sync push [-y] [--force|-f] [--rollback-on-error]
 c2sync save [-y]
 c2sync discard
 c2sync revert [COMMIT] [-y] [--force|-f]   # COMMIT defaults to HEAD
@@ -212,6 +212,61 @@ Two things this wrapper adds on top of raw Netmiko, transport-independent:
 commit the new baseline to git, mark `device_dirty` clean) after these confirmed
 returns — never optimistically.
 
+### Out-of-band drift check (`push`'s pre-flight)
+
+Everything `_refresh_staging()` computes is offline: `EDIT_FILE` diffed against
+`device.config` at git `HEAD`, never the device. `push` used to trust that all the way
+through — it previewed those commands, took the confirmation, and only then opened a
+connection, to `apply_config()` and nothing else. So if the device had changed
+out-of-band (another operator on the console, another tool), the preview described a
+device that no longer existed, and the user approved it anyway.
+
+Deletions are the sharp edge, because negations are generated from the **baseline's**
+content rather than the device's: delete `description Server` locally and c2sync emits
+`no description Server`, which on IOS clears whatever description is actually there —
+silently destroying a colleague's `description Core-Uplink` that replaced it, with
+nothing in the preview hinting at it. This is `git push` without a fetch, and the fix is
+git's: check first, refuse to push over a moved target.
+
+`_reconcile_out_of_band_drift()` runs inside `_connected()` before any preview is shown.
+It reads the live running-config and diffs it against the baseline **with
+`Differ.diff_lines`, not string equality**, so formatting noise in `show
+running-config` isn't mistaken for a change. No drift → returns the staged lines
+untouched and the command behaves exactly as before.
+
+On drift it prints what changed on the device, then:
+
+- `--force`/`-f` — adopt without asking.
+- `-y` alone — **hard failure, exit 1**, never a prompt. `-y` means "don't ask me to
+  confirm my own commands", not "silently overwrite someone else's work", and prompting
+  here would hang a CI job on stdin. Same flag split as `pull`/`revert`, where `-y` and
+  `--force` are also deliberately independent.
+- otherwise — prompt; declining exits 1 with nothing sent.
+
+Adopting calls `git_ops.commit_content()` (which is why that function exists in the
+shape it does — it advances `HEAD` to the live config **without touching `EDIT_FILE`**),
+then re-runs `_refresh_staging()`. The user's edits survive, the drift is recorded as a
+commit visible in `git log`, and the recomputed preview is the truth. Note the
+recomputed commands *will* include undoing the out-of-band change, since `EDIT_FILE`
+doesn't contain it — that is the intended outcome, not a flaw: it happens either way,
+and this is the version where the operator sees it before approving. Keeping both sets
+of changes is a real three-way merge, deliberately not built — `PROJECT_DIR` is a normal
+git repo and git can do it.
+
+**Consequences for the rest of `push`.** The preview and its confirmation now live
+*inside* the `with _connected(...)` block, since neither can be computed before the
+device has been read — so `push` prompts for credentials before showing anything.
+`pre_push_head` is captured **after** drift handling, so a `--rollback-on-error` rollback
+targets what the device actually had immediately before this push rather than a
+pre-adoption baseline. A successful push now costs two fetches (drift check, then the
+post-push re-read).
+
+**Not covered:** when nothing is staged locally, `push` still returns early without
+connecting, so drift goes undetected there. That is safe — no commands are generated
+from the stale baseline — but it does mean `status` alone can report `synced` for a
+device that has drifted. `status` is deliberately offline (the `git status` analog), so
+detecting that would need its own opt-in device read.
+
 ### Partial-push reconciliation (`push`'s error path)
 
 `apply_config` aborts the batch on the first rejected command, but the commands
@@ -284,7 +339,8 @@ confirmation at all, since there's nothing local to lose. `pull` has no `-y` —
 other prompt to skip, so (like `revert`, see below) the overwrite-approval flag is
 `--force`/`-f` specifically, never a generic "don't ask me anything" flag. `status` is read-only
 (recomputes staging, prints state + preview, never connects to the device — this is the
-`git status` analog). `push` sends the staged commands, then re-fetches `show running-config brief`,
+`git status` analog). `push` checks the device for out-of-band drift first (see
+Out-of-band drift check above), sends the staged commands, then re-fetches `show running-config brief`,
 writes it to `EDIT_FILE`, and makes a real git commit in `PROJECT_DIR` (`git_ops.
 commit()`) — advancing `HEAD` *is* advancing the baseline now. When the push is rejected
 partway it does *not* just bail: see Partial-push reconciliation above. `save` refuses to run
@@ -367,7 +423,9 @@ half-prompts or hangs on stdin in CI. `C2SYNC_SECRET` is checked the same way as
 `C2SYNC_PASSWORD` but is optional either way (`None` if unset, prompted for otherwise).
 Passwords/enable-secrets are **never** read from the global config file or stored
 anywhere by c2sync itself — env vars are meant to be injected by the CI system's own
-secrets manager. Combined with `push -y`/`save -y` (skips the confirmation prompt
+secrets manager. Note `push -y` fails closed on out-of-band drift rather than
+prompting, which is what keeps a CI job from pushing against a stale baseline;
+`--force` is the opt-out. Combined with `push -y`/`save -y` (skips the confirmation prompt
 too), this is what unblocks the PR-merge-triggers-apply workflow: a CI job that runs
 `c2sync push -y` against the device once a config change is reviewed and merged, which
 is the actual payoff of tracking device config in git rather than just having a
