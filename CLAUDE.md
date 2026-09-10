@@ -33,7 +33,7 @@ pytest c2sync/tests/test_differ.py::test_refresh_staging_stages_additions_with_c
 # anything beyond `init`/`status`/`discard`)
 c2sync init /dev/ttyUSB0 [BAUDRATE]     # serial transport
 c2sync init --ssh HOST [PORT]           # SSH transport
-c2sync pull [-y]
+c2sync pull [--force|-f]
 c2sync status
 c2sync sync [-y]
 c2sync commit [-y]
@@ -190,13 +190,15 @@ returns — never optimistically.
 
 ### CLI surface (`main.py`)
 
-Actual commands: `init`, `pull`, `status`, `sync`, `commit`, `discard`. `pull` connects,
-fetches `show running-config brief`, writes it to `EDIT_FILE`, and commits it — this is
-how an already-configured device gets onboarded (`init` alone only creates an empty
-`device.config`), and it doubles as a way to resync the baseline if the device changed
-out-of-band. It refuses to run while `host_dirty` unless passed `-y` (would silently
-clobber uncommitted local edits); when not `host_dirty` it needs no confirmation at all,
-since there's nothing local to lose. `status` is read-only
+Actual commands: `init`, `pull`, `status`, `sync`, `commit`, `discard`, `revert`. `pull`
+connects, fetches `show running-config brief`, writes it to `EDIT_FILE`, and commits it
+— this is how an already-configured device gets onboarded (`init` alone only creates an
+empty `device.config`), and it doubles as a way to resync the baseline if the device
+changed out-of-band. It refuses to run while `host_dirty` unless passed `--force`/`-f`
+(would silently clobber uncommitted local edits); when not `host_dirty` it needs no
+confirmation at all, since there's nothing local to lose. `pull` has no `-y` — it has no
+other prompt to skip, so (like `revert`, see below) the overwrite-approval flag is
+`--force`/`-f` specifically, never a generic "don't ask me anything" flag. `status` is read-only
 (recomputes staging, prints state + preview, never connects to the device — this is the
 `git status` analog). `sync` pushes, then re-fetches `show running-config brief`,
 writes it to `EDIT_FILE`, and makes a real git commit in `PROJECT_DIR` (`git_ops.

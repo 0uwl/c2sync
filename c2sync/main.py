@@ -22,6 +22,7 @@ c2sync COMMAND
 Commands:
     init         Start a C2Sync session in the current working directory
     pull         Fetch the device's running config and make it the new baseline
+                 [--force|-f]  required to overwrite unsynced local edits
     status       Show whether the local config file has unsynced edits
     sync         Preview changes and confirm or abort them
     commit       Issues the command to save the running config to the startup config on the device
@@ -96,14 +97,18 @@ def pull(arguments: list):
     baseline can be resynced if the device changed out-of-band.
     """
     LOGGER.debug(f'Given arguments: {arguments}')
-    force = '-y' in arguments
+    # pull has no other prompt to skip, so unlike sync/commit/revert there's
+    # no separate -y - --force/-f is the only flag, matching revert's split
+    # (a plain "skip prompts" flag must never be the same thing as "yes,
+    # overwrite my local edits").
+    force = '--force' in arguments or '-f' in arguments
 
     project = _require_project()
 
     state = StateEngine(project).state
     if state.host_dirty and not force:
         print('You have unsynced local edits that would be overwritten. Run '
-              '`c2sync discard` first, or `c2sync pull -y` to overwrite them anyway.')
+              '`c2sync discard` first, or `c2sync pull --force` (or `-f`) to overwrite them anyway.')
         sys.exit(1)
 
     with _connected(project) as interface:

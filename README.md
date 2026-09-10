@@ -48,7 +48,7 @@ c2sync COMMAND
 Commands:
   init      SERIAL_DEVICE [BAUDRATE]  Start a project for one device over serial
   init      --ssh HOST [PORT]         Start a project for one device over SSH
-  pull      [-y]                      Fetch the device's running config and make it the new baseline
+  pull      [--force|-f]               Fetch the device's running config and make it the new baseline
   status                              Show whether there are unsynced local edits or an unsaved device change
   sync      [-y]                      Preview and push staged changes to the device
   commit    [-y]                      Save the device's running config to its startup config
@@ -73,12 +73,12 @@ Behavior:
 ### 2. Pull
 
 ```
-c2sync pull [-y]
+c2sync pull [--force|-f]
 ```
 Behavior:
 * Connects to the device, fetches the running config, and commits it as the new baseline — this is how you onboard a device that's already configured (`init` alone only creates an empty `device.config`)
 * Also useful later to resync the baseline if the device changed outside of C2Sync
-* Refuses to run if you have unsynced local edits, unless `-y` is passed to overwrite them
+* Refuses to run if you have unsynced local edits, unless `--force`/`-f` is passed to overwrite them — there's no `-y` here, since pull has no other prompt to skip; a flag that only means "overwrite my local edits" shouldn't be spelled the same as "don't ask me anything"
 
 ### 3. Local Editing
 

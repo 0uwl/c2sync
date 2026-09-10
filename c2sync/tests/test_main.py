@@ -200,6 +200,23 @@ def test_pull_refuses_when_host_dirty_without_force(project):
         mock_handler.assert_not_called()
 
 
+def test_pull_dash_y_does_not_overwrite_host_dirty_edits(project):
+    """
+    pull has no other prompt -y would otherwise skip, so unlike
+    sync/commit it doesn't recognize -y at all here - only --force/-f
+    overwrites local edits, never a flag that reads as "just don't ask me
+    anything".
+    """
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
+    main_module.status([])
+    assert StateEngine(project).state.host_dirty is True
+
+    with patch('c2sync.connector.ConnectHandler') as mock_handler:
+        with pytest.raises(SystemExit):
+            main_module.pull(['-y'])
+        mock_handler.assert_not_called()
+
+
 def test_pull_overwrites_host_dirty_edits_with_force(project):
     _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
     main_module.status([])
@@ -211,10 +228,25 @@ def test_pull_overwrites_host_dirty_edits_with_force(project):
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
-        main_module.pull(['-y'])
+        main_module.pull(['--force'])
 
     with open(project.EDIT_FILE) as file:
         assert file.read() == 'hostname Router1\n'
+    assert StateEngine(project).state.host_dirty is False
+
+
+def test_pull_short_dash_f_also_overwrites_host_dirty_edits(project):
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
+    main_module.status([])
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_command.return_value = 'hostname Router1\n'
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.pull(['-f'])
+
     assert StateEngine(project).state.host_dirty is False
 
 
