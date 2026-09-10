@@ -4,7 +4,7 @@ import pytest
 
 from netmiko.exceptions import ConfigInvalidException
 
-from c2sync import main as main_module
+from c2sync import git_ops, main as main_module
 from c2sync import get_project
 from c2sync.state_engine import StateEngine
 
@@ -360,3 +360,138 @@ def test_discard_reverts_edit_file_to_baseline(project):
         assert file.read() == ''
 
     assert StateEngine(project).state.host_dirty is False
+
+
+# ------------------------------------------------------------------
+# revert
+# ------------------------------------------------------------------
+
+def _sync_known_good(project, config_lines):
+    """
+    Push config_lines via a normal sync, so it becomes the git baseline
+    (HEAD) revert tests recover back to.
+    """
+    _write(project.EDIT_FILE, config_lines)
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_config_set.return_value = 'ok'
+    mock_conn.send_command.return_value = '\n'.join(config_lines) + '\n'
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.sync(['-y'])
+
+
+def test_revert_pushes_diff_between_live_config_and_head_by_default(project):
+    _sync_known_good(project, ['interface Gi1/0/1', ' shutdown'])
+
+    # Simulate drift: the device's actual running config no longer has the
+    # "shutdown" line HEAD says it should (as if a prior push half-failed),
+    # and confirms it after the fix lands.
+    revert_conn = MagicMock()
+    revert_conn.check_enable_mode.return_value = True
+    revert_conn.send_config_set.return_value = 'interface Gi1/0/1\n shutdown\nend'
+    revert_conn.send_command.side_effect = [
+        'interface Gi1/0/1\n',
+        'interface Gi1/0/1\n shutdown\n',
+    ]
+
+    patches = _mocked_connect(revert_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.revert(['-y'])
+
+    pushed_lines = revert_conn.send_config_set.call_args[0][0]
+    assert any('shutdown' in line for line in pushed_lines)
+
+    with open(project.EDIT_FILE) as file:
+        assert file.read() == 'interface Gi1/0/1\n shutdown\n'
+
+    assert git_ops.show_at_head(project.PROJECT_DIR, 'device.config') == 'interface Gi1/0/1\n shutdown\n'
+
+    state = StateEngine(project).state
+    assert state.host_dirty is False
+    assert state.device_dirty is True
+
+
+def test_revert_to_an_explicit_older_commit(project):
+    _sync_known_good(project, ['interface Gi1/0/1', ' description GOOD'])
+    good_sha = git_ops.resolve_rev(project.PROJECT_DIR, 'HEAD')
+
+    # Move HEAD forward to a second, different sync.
+    _sync_known_good(project, ['interface Gi1/0/1', ' description LATER'])
+
+    # The live device now matches the *later* commit's config, unrelated to
+    # what we're reverting to - revert should still target good_sha.
+    revert_conn = MagicMock()
+    revert_conn.check_enable_mode.return_value = True
+    revert_conn.send_config_set.return_value = 'ok'
+    revert_conn.send_command.side_effect = [
+        'interface Gi1/0/1\n description LATER\n',
+        'interface Gi1/0/1\n description GOOD\n',
+    ]
+
+    patches = _mocked_connect(revert_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.revert([good_sha, '-y'])
+
+    pushed_lines = revert_conn.send_config_set.call_args[0][0]
+    assert any('description GOOD' in line for line in pushed_lines)
+    assert git_ops.show_at_head(project.PROJECT_DIR, 'device.config') == 'interface Gi1/0/1\n description GOOD\n'
+
+
+def test_revert_unresolvable_commit_exits_without_connecting(project):
+    with patch('c2sync.connector.ConnectHandler') as mock_handler:
+        with pytest.raises(SystemExit):
+            main_module.revert(['not-a-real-commit', '-y'])
+        mock_handler.assert_not_called()
+
+
+def test_revert_nothing_to_revert_when_live_matches_target(project):
+    # HEAD (from init) is an empty device.config.
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_command.return_value = ''
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.revert(['-y'])
+
+    mock_conn.send_config_set.assert_not_called()
+
+
+def test_revert_device_rejects_leaves_git_and_state_untouched(project):
+    # _sync_known_good already leaves device_dirty True (a normal sync's own
+    # effect) - the point of this test is that a *rejected* revert doesn't
+    # change it any further, not that it resets to False.
+    _sync_known_good(project, ['interface Gi1/0/1', ' shutdown'])
+    head_before = git_ops.resolve_rev(project.PROJECT_DIR, 'HEAD')
+    device_dirty_before = StateEngine(project).state.device_dirty
+
+    revert_conn = MagicMock()
+    revert_conn.check_enable_mode.return_value = True
+    revert_conn.send_command.return_value = 'interface Gi1/0/1\n'
+    revert_conn.send_config_set.side_effect = ConfigInvalidException('bad command')
+
+    patches = _mocked_connect(revert_conn)
+    with patches[0], patches[1], patches[2]:
+        with pytest.raises(SystemExit):
+            main_module.revert(['-y'])
+
+    assert git_ops.resolve_rev(project.PROJECT_DIR, 'HEAD') == head_before
+    assert StateEngine(project).state.device_dirty is device_dirty_before
+
+
+def test_revert_prompts_and_aborts_without_dash_y(project):
+    _sync_known_good(project, ['interface Gi1/0/1', ' shutdown'])
+    head_before = git_ops.resolve_rev(project.PROJECT_DIR, 'HEAD')
+
+    revert_conn = MagicMock()
+    revert_conn.check_enable_mode.return_value = True
+    revert_conn.send_command.return_value = 'interface Gi1/0/1\n'
+
+    patches = _mocked_connect(revert_conn)
+    with patches[0], patches[2], patch('builtins.input', side_effect=['admin', 'n']):
+        main_module.revert([])
+
+    revert_conn.send_config_set.assert_not_called()
+    assert git_ops.resolve_rev(project.PROJECT_DIR, 'HEAD') == head_before

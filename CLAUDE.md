@@ -38,6 +38,7 @@ c2sync status
 c2sync sync [-y]
 c2sync commit [-y]
 c2sync discard
+c2sync revert [COMMIT] [-y]     # COMMIT defaults to HEAD
 ```
 
 All tests are mocked at the Netmiko/`ConnectHandler` boundary — no real hardware,
@@ -82,7 +83,7 @@ relative to cwd — commands must be run from the project directory.
 | `c2sync/user_config.py` | Reads the optional global TOML preferences file — `load()`/`config_path()` |
 | `c2sync/state_engine.py` | `StateEngine` — `host_dirty`/`device_dirty` tracking |
 | `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigSaveError`, `HostKeyRejectedError` |
-| `c2sync/main.py` | CLI entry point: `init` / `pull` / `status` / `sync` / `commit` / `discard` |
+| `c2sync/main.py` | CLI entry point: `init` / `pull` / `status` / `sync` / `commit` / `discard` / `revert` |
 
 ### Diff → CLI command translation (`differ.py`)
 
@@ -212,6 +213,25 @@ staging) so discarded edits can't get silently re-staged on the next check.
 repo is a normal git repo the user can drive directly with `git` or push to
 GitHub/GitLab for review.
 
+`revert [COMMIT] [-y]` is the manual recovery path for a bad push (e.g. a batch
+where command 3 of 8 got rejected after 1-2 already landed) — see Known constraints.
+`COMMIT` defaults to `HEAD` (the last confirmed sync). Unlike every other command
+here, it diffs against a config fetched **fresh from the device right now**, not
+`EDIT_FILE` — after something's gone wrong, neither `EDIT_FILE` nor the git baseline
+is guaranteed to reflect what's actually running, only the device itself is.
+Sequence: `git_ops.resolve_rev()` the target (raises `git_ops.GitError` on a typo'd
+commit — this must never silently fall back to an empty target, which would try to
+strip the entire device config), `git_ops.show_at()` that commit's `device.config`
+(deliberately not the soft-fallback `show_at_head()` — a bad rev here must be a hard
+error too), connect and fetch the live running-config, `Differ.diff_lines(live,
+target)`, preview and confirm (or `-y`), `apply_config()`. On success it re-fetches
+and writes `EDIT_FILE`, same as `sync`. Modeled on `git revert`, not `git reset
+--hard`: it makes a **new** commit recording the recovered state rather than
+rewinding `HEAD`, so the incident stays visible in `git log` (and is a no-op commit
+when the recovered content already matches `HEAD`, exactly like `git_ops.commit()`'s
+existing "nothing changed" short-circuit that `sync`/`pull` already rely on).
+`host_dirty`/`device_dirty` transition the same way a successful `sync` does.
+
 `_connect()` in `main.py` resolves `username` from `C2SYNC_USERNAME`, then the global
 config's `username` key (see Global user config below); `password` only from
 `C2SYNC_PASSWORD`. It only skips `input()`/`getpass.getpass()` once both username and
@@ -265,8 +285,11 @@ but broken config is very likely a real mistake worth surfacing.
 
 - Cisco IOS only; `device_type='cisco_ios'` is hardcoded in `connector.py`, and
   `Diff(..., syntax='ios')` is hardcoded in `differ.py`.
-- No rollback if command N of a multi-command batch is rejected after N-1 already
-  landed on the device.
+- No *automatic* rollback if command N of a multi-command batch is rejected after
+  N-1 already landed on the device — `apply_config` aborts the batch but doesn't
+  undo what already applied. `c2sync revert` (see CLI surface above) is the manual
+  recovery path: it diffs the live device against a past commit and pushes the
+  correction.
 - No file locking on `state.json`/`staging.txt` — fine for one interactive CLI
   invocation at a time, not safe for concurrent access.
 

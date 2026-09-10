@@ -95,6 +95,24 @@ def test_refresh_staging_ignores_unchanged_multiline_block(differ):
 
 
 # ------------------------------------------------------------------
+# Test: diff_lines
+# ------------------------------------------------------------------
+
+def test_diff_lines_returns_commands_without_touching_staging_file(differ):
+    """
+    `c2sync revert` uses diff_lines directly (live device config -> a past
+    commit) without going through the staging file, since a revert isn't a
+    pending local edit - it's an immediate corrective push.
+    """
+    before = Path(differ.staging_file).read_text()
+
+    lines = Differ.diff_lines("interface Gi1/0/1\n", "interface Gi1/0/1\n shutdown\n")
+
+    assert any("shutdown" in line for line in lines)
+    assert Path(differ.staging_file).read_text() == before
+
+
+# ------------------------------------------------------------------
 # Test: refresh_staging_from_files
 # ------------------------------------------------------------------
 

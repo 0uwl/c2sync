@@ -25,6 +25,18 @@ class Differ:
         self.staging_file = project.STAGING_FILE
 
 
+    @staticmethod
+    def diff_lines(from_config: str, to_config: str) -> list[str]:
+        """
+        The CLI commands needed to turn from_config into to_config, via
+        ciscoconfparse2's parent/child tree diff rather than raw text. The
+        one place that actually calls ciscoconfparse2.Diff - refresh_staging
+        (EDIT_FILE vs. the git baseline) and `c2sync revert` (a past commit
+        vs. the device's live running-config) both build on this.
+        """
+        return Diff(from_config, to_config, syntax='ios').get_diff()
+
+
     def refresh_staging(self, baseline_config: str, current_config: str) -> bool:
         """
         Recompute the staging file from scratch by diffing a known-good
@@ -40,7 +52,7 @@ class Differ:
         Returns True if any commands were staged, False if the current
         config already matches the baseline.
         """
-        lines = Diff(baseline_config, current_config, syntax='ios').get_diff()
+        lines = self.diff_lines(baseline_config, current_config)
 
         with open(self.staging_file, 'w') as file:
             for line in lines:

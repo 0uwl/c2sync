@@ -53,6 +53,7 @@ Commands:
   sync      [-y]                      Preview and push staged changes to the device
   commit    [-y]                      Save the device's running config to its startup config
   discard                             Revert local edits back to the last confirmed sync
+  revert    [COMMIT] [-y]             Push the device back to a past commit (default: HEAD)
 ```
 
 ## General workflow
@@ -152,6 +153,18 @@ c2sync discard
 ```
 Behavior:
 * Reverts local edits back to the last confirmed sync (`device.config` at git `HEAD`) and clears anything staged
+
+### 8. Revert
+
+```
+c2sync revert [COMMIT] [-y]
+```
+Behavior:
+* Recovers a device that's ended up in a bad state — e.g. a `sync` where one command in the middle of a batch got rejected after earlier ones already landed
+* Fetches the running config from the device **right now** and diffs it against `COMMIT` (a past commit's `device.config`, `HEAD` if omitted) — not your local `device.config`, since after something's gone wrong that file isn't guaranteed to reflect what's actually running either
+* Displays the commands needed to bring the device back to that commit's config, then pushes them if confirmed (or `-y`)
+* Records the recovery as a **new** git commit rather than moving `HEAD` backward, like `git revert` rather than `git reset --hard` — the incident stays visible in `git log` instead of being erased
+* If the device already matches the target commit, it says so and doesn't push anything
 
 ## Credentials
 

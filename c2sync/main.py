@@ -24,6 +24,7 @@ Commands:
     sync         Preview changes and confirm or abort them
     commit       Issues the command to save the running config to the startup config on the device
     discard      Cancel the current C2Sync session
+    revert       Push the device's running config back to a past commit (HEAD by default)
 """
 
 def main():
@@ -48,6 +49,8 @@ def main():
             commit(command_arguments)
         case 'discard':
             discard(command_arguments)
+        case 'revert':
+            revert(command_arguments)
         case _:
             LOGGER.error(f'Unknown command {command}')
             print(USAGE)
@@ -235,6 +238,95 @@ def discard(arguments: list):
     Differ(project).clear_staging()
     StateEngine(project).mark_host_clean()
     print('Discarded staged changes.')
+
+
+def revert(arguments: list):
+    """
+    Push the device's running config back to what it looked like at a past
+    commit (HEAD - the last confirmed sync - by default), for recovering
+    from a bad push (e.g. one command in a batch got rejected after others
+    already landed) without hand-crafting the fix.
+
+    Diffed against a config fetched fresh from the device right now, not
+    EDIT_FILE - after something's gone wrong, neither EDIT_FILE nor the git
+    baseline is guaranteed to reflect what's actually running.
+
+    Like `git revert`, not `git reset --hard`: this makes a *new* commit
+    recording the recovered state rather than rewinding HEAD, so the
+    incident stays visible in `git log` instead of being erased.
+    """
+    LOGGER.debug(f'Given arguments: {arguments}')
+    force = '-y' in arguments
+    positional = [arg for arg in arguments if arg != '-y']
+    target_rev = positional[0] if positional else 'HEAD'
+
+    project = _require_project()
+    edit_file_name = os.path.relpath(project.EDIT_FILE, project.PROJECT_DIR)
+
+    try:
+        resolved_sha = git_ops.resolve_rev(project.PROJECT_DIR, target_rev)
+    except git_ops.GitError as e:
+        print(f"Could not resolve '{target_rev}': {e}")
+        sys.exit(1)
+
+    try:
+        target_config = git_ops.show_at(project.PROJECT_DIR, resolved_sha, edit_file_name)
+    except git_ops.GitError as e:
+        print(f"'{edit_file_name}' is not tracked at {resolved_sha[:8]}: {e}")
+        sys.exit(1)
+
+    interface = _connect(project)
+    live_config = interface.get_running_config()
+
+    lines = Differ.diff_lines(live_config, target_config)
+
+    if not lines:
+        print(f'Running config already matches {resolved_sha[:8]}. Nothing to revert.')
+        interface.disconnect()
+        return
+
+    print(f'Reverting running config to {resolved_sha[:8]} - the following commands will be sent to the device:\n')
+    for line in lines:
+        print(f'  {line}')
+
+    if not force and not _confirm('\nProceed?'):
+        print('Aborted.')
+        interface.disconnect()
+        return
+
+    try:
+        interface.apply_config(lines)
+    except ConfigApplyError as e:
+        print(f'\nDevice rejected the revert - it may now be in a partially-applied '
+              f'state, check `c2sync status` and the device directly:\n{e}')
+        interface.disconnect()
+        sys.exit(1)
+
+    # The revert push is Netmiko-confirmed at this point. Re-fetch rather
+    # than assuming the device now matches target_config verbatim - same
+    # reasoning `sync` already follows after its own push.
+    new_config = interface.get_running_config()
+    interface.disconnect()
+
+    with open(project.EDIT_FILE, 'w') as file:
+        file.write(new_config)
+
+    git_ops.commit(
+        project.PROJECT_DIR, [edit_file_name],
+        f'c2sync revert: reverted {project.target} to {resolved_sha[:8]}'
+    )
+
+    # Whatever was staged before is now stale - EDIT_FILE just got
+    # overwritten with the post-revert device state. host_dirty/device_dirty
+    # follow the same transitions as a successful sync: local edits are (no
+    # longer) a concept here, and running-config now differs from
+    # startup-config again until `c2sync commit`.
+    Differ(project).clear_staging()
+    state_engine = StateEngine(project)
+    state_engine.mark_host_clean()
+    state_engine.mark_device_dirty()
+
+    print('\nReverted. Device has pending changes not yet saved to startup-config (run `c2sync commit`).')
 
 
 def _require_project() -> Project:

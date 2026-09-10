@@ -46,12 +46,35 @@ def commit_empty(project_dir: str, message: str) -> None:
     _run(project_dir, 'commit', '-q', '--allow-empty', '-m', message)
 
 
+def resolve_rev(project_dir: str, rev: str) -> str:
+    """
+    Resolve a rev-ish (HEAD, a short/long sha, a branch name, ...) to a
+    full commit sha. Raises GitError with git's own message if it doesn't
+    resolve to anything - e.g. a typo'd commit passed to `c2sync revert`.
+    """
+    return _run(project_dir, 'rev-parse', rev).strip()
+
+
+def show_at(project_dir: str, rev: str, path: str) -> str:
+    """
+    Return a tracked file's content as of the given rev. Raises GitError if
+    the rev doesn't resolve or the file isn't tracked there - this never
+    silently substitutes an empty file for a bad rev, unlike show_at_head.
+    Callers that want that soft fallback should use show_at_head instead;
+    callers acting on a rev the user typed (e.g. `c2sync revert COMMIT`)
+    should call this directly and surface the error.
+    """
+    return _run(project_dir, 'show', f'{rev}:{path}')
+
+
 def show_at_head(project_dir: str, path: str) -> str | None:
     """
-    Return a tracked file's content as of HEAD, or None if there's no
-    commit yet or the file isn't tracked at HEAD.
+    Same as show_at(project_dir, 'HEAD', path), but returns None instead of
+    raising when there's no commit yet (a brand new project) or the file
+    isn't tracked at HEAD - the soft-fallback case every existing caller
+    (Differ's baseline lookup, `discard`) wants.
     """
     try:
-        return _run(project_dir, 'show', f'HEAD:{path}')
+        return show_at(project_dir, 'HEAD', path)
     except GitError:
         return None
