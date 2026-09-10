@@ -318,12 +318,60 @@ def test_sync_pushes_staged_changes_and_updates_baseline(project):
         assert file.read() == ''
 
 
-def test_sync_rejected_by_device_leaves_staging_and_state_intact(project):
-    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' bogus-command'])
+def test_sync_partial_push_moves_baseline_to_what_actually_landed(project):
+    """
+    apply_config aborts on the first rejected command, but the commands
+    before it are already on the device. The baseline has to move to match,
+    or `status` reports the landed commands as still-unsynced local edits -
+    which is exactly the misleading state this reconciliation exists to fix.
+    """
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown', ' bogus-command'])
+
+    # ' shutdown' landed; ' bogus-command' is what the device rejected.
+    partial_live = 'interface Gi1/0/1\n shutdown\n!\n'
 
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
     mock_conn.send_config_set.side_effect = ConfigInvalidException('bad command')
+    mock_conn.send_command.return_value = partial_live
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        with pytest.raises(SystemExit):
+            main_module.sync(['-y'])
+
+    # The baseline is now what the device actually has...
+    assert git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) == partial_live
+    # ...while the user's edits are untouched.
+    with open(project.EDIT_FILE) as file:
+        assert 'bogus-command' in file.read()
+
+    # Landed commands are in running-config but not startup-config.
+    state = StateEngine(project).state
+    assert state.device_dirty is True
+    assert state.host_dirty is True
+
+    # Staging now lists only what still has to be pushed.
+    with open(project.STAGING_FILE) as file:
+        staged = file.read()
+    assert 'bogus-command' in staged
+    assert 'shutdown' not in staged
+
+
+def test_sync_rejected_first_command_leaves_state_intact(project):
+    """
+    The other half of the same path: when nothing landed, the baseline must
+    not move and the device must not be marked dirty.
+    """
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' bogus-command'])
+
+    baseline_before = git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath)
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_config_set.side_effect = ConfigInvalidException('bad command')
+    # Device is unchanged - the first command was the rejected one.
+    mock_conn.send_command.return_value = baseline_before
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
@@ -333,9 +381,90 @@ def test_sync_rejected_by_device_leaves_staging_and_state_intact(project):
     state = StateEngine(project).state
     assert state.host_dirty is True
     assert state.device_dirty is False
+    assert git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) == baseline_before
 
     with open(project.STAGING_FILE) as file:
         assert 'bogus-command' in file.read()
+
+
+def test_sync_does_not_roll_back_without_the_flag(project):
+    """
+    Undoing a partial push sends more config to a device that just rejected
+    some, so it must never happen unasked.
+    """
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown', ' bogus-command'])
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_config_set.side_effect = ConfigInvalidException('bad command')
+    mock_conn.send_command.return_value = 'interface Gi1/0/1\n shutdown\n!\n'
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        with pytest.raises(SystemExit):
+            main_module.sync(['-y'])
+
+    # Only the original push was attempted - no correction was sent.
+    assert mock_conn.send_config_set.call_count == 1
+
+
+def test_sync_rollback_on_error_pushes_device_back_to_pre_sync_baseline(project):
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown', ' bogus-command'])
+
+    baseline_before = git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath)
+    partial_live = 'interface Gi1/0/1\n shutdown\n!\n'
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    # First push is rejected; the rollback push that follows succeeds.
+    mock_conn.send_config_set.side_effect = [ConfigInvalidException('bad command'), 'ok']
+    mock_conn.send_command.side_effect = [
+        partial_live,      # reconciliation: what actually landed
+        partial_live,      # rollback: live config to diff against the baseline
+        baseline_before,   # rollback: state after the correction was applied
+    ]
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        with pytest.raises(SystemExit):
+            main_module.sync(['-y', '--rollback-on-error'])
+
+    # A correction was actually pushed, and it undid the landed command.
+    assert mock_conn.send_config_set.call_count == 2
+    rollback_lines = mock_conn.send_config_set.call_args_list[1].args[0]
+    assert any('no ' in line for line in rollback_lines)
+
+    # Baseline records the recovered device, edits still untouched.
+    assert git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) == baseline_before
+    with open(project.EDIT_FILE) as file:
+        assert 'bogus-command' in file.read()
+
+    assert StateEngine(project).state.device_dirty is True
+
+
+def test_sync_rollback_on_error_asks_before_pushing_the_correction(project):
+    """
+    -y skips the push preview; it must not also silently authorise sending
+    a second, corrective batch to a device that is already misbehaving.
+
+    Prompt order here is: push confirmation (asked before connecting), the
+    username prompt, then the rollback confirmation - which is the 'n'.
+    """
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown', ' bogus-command'])
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_config_set.side_effect = ConfigInvalidException('bad command')
+    mock_conn.send_command.return_value = 'interface Gi1/0/1\n shutdown\n!\n'
+
+    with patch('c2sync.connector.ConnectHandler', return_value=mock_conn), \
+         patch('builtins.input', side_effect=['y', 'admin', 'n']), \
+         patch('getpass.getpass', side_effect=['pw', '']):
+        with pytest.raises(SystemExit):
+            main_module.sync(['--rollback-on-error'])
+
+    # Declining the rollback prompt means no correction is sent.
+    assert mock_conn.send_config_set.call_count == 1
 
 
 def test_sync_with_no_edits_does_not_connect(project):
@@ -625,3 +754,92 @@ def test_revert_disconnects_even_if_fetching_live_config_raises(project):
             main_module.revert(['-y'])
 
     revert_conn.disconnect.assert_called_once()
+
+
+# ------------------------------------------------------------------
+# help / unknown commands
+# ------------------------------------------------------------------
+
+@pytest.mark.parametrize('argv', [
+    ['c2sync'],
+    ['c2sync', 'help'],
+    ['c2sync', '-h'],
+    ['c2sync', '--help'],
+])
+def test_help_prints_usage_to_stdout_and_exits_cleanly(argv, monkeypatch, capsys):
+    monkeypatch.setattr('sys.argv', argv)
+
+    main_module.main()
+
+    captured = capsys.readouterr()
+    assert 'Usage:' in captured.out
+    assert 'revert' in captured.out
+    assert captured.err == ''
+
+
+ALL_COMMANDS = ['init', 'pull', 'status', 'sync', 'commit', 'discard', 'revert']
+
+
+@pytest.mark.parametrize('command', ALL_COMMANDS)
+@pytest.mark.parametrize('flag', ['-h', '--help'])
+def test_help_flag_after_a_command_prints_its_own_help_without_running_it(
+    command, flag, monkeypatch, capsys, tmp_path
+):
+    # Guards a real footgun: without this, `c2sync init --help` would start a
+    # project for a device literally named '--help'.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr('sys.argv', ['c2sync', command, flag])
+
+    main_module.main()
+
+    out = capsys.readouterr().out
+    assert f'Usage: c2sync {command}' in out
+    assert not (tmp_path / '.c2sync').exists()
+
+
+@pytest.mark.parametrize('command', ALL_COMMANDS)
+def test_help_subcommand_prints_that_commands_help(command, monkeypatch, capsys):
+    monkeypatch.setattr('sys.argv', ['c2sync', 'help', command])
+
+    main_module.main()
+
+    assert f'Usage: c2sync {command}' in capsys.readouterr().out
+
+
+def test_every_command_has_help_text():
+    # A new command added to the dispatch without help text should fail here
+    # rather than silently falling back to the top-level usage.
+    assert sorted(main_module.COMMAND_HELP) == sorted(ALL_COMMANDS)
+
+
+@pytest.mark.parametrize('command', ALL_COMMANDS)
+def test_help_flag_is_caught_in_any_argument_position(command, monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr('sys.argv', ['c2sync', command, 'somevalue', '--help'])
+
+    main_module.main()
+
+    assert f'Usage: c2sync {command}' in capsys.readouterr().out
+    assert not (tmp_path / '.c2sync').exists()
+
+
+def test_help_for_unknown_topic_falls_back_to_top_level_usage(monkeypatch, capsys):
+    monkeypatch.setattr('sys.argv', ['c2sync', 'help', 'bogus'])
+
+    main_module.main()
+
+    out = capsys.readouterr().out
+    assert 'Usage:' in out
+    assert 'Commands:' in out
+
+
+def test_unknown_command_exits_nonzero_with_usage_on_stderr(monkeypatch, capsys):
+    monkeypatch.setattr('sys.argv', ['c2sync', 'bogus'])
+
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main()
+
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert 'Usage:' in captured.err
+    assert 'Usage:' not in captured.out

@@ -15,31 +15,186 @@ from c2sync.state_engine import StateEngine
 
 LOGGER = logging.getLogger(__name__)
 
+# One line per command, no flags: arguments and flags live in COMMAND_HELP
+# below, so there is exactly one place to edit when they change.
 USAGE = """
 Usage:
-c2sync COMMAND
+c2sync COMMAND [ARGS]
 
 Commands:
-    init         Start a C2Sync session in the current working directory
-    pull         Fetch the device's running config and make it the new baseline
-                 [--force|-f]  required to overwrite unsynced local edits
-    status       Show whether the local config file has unsynced edits
-    sync         Preview changes and confirm or abort them
-    commit       Issues the command to save the running config to the startup config on the device
-    discard      Cancel the current C2Sync session
-    revert       Push the device's running config back to a past commit (HEAD by default)
-                 [COMMIT] [-y] [--force|-f]  -y skips the push confirmation; --force/-f
-                 is required to overwrite unsynced local edits
+    init      Start a project for one device in the current directory
+    pull      Fetch the device's running config and make it the new baseline
+    status    Show unsynced local edits and unsaved device changes
+    sync      Preview the staged commands and push them to the device
+    commit    Save the device's running config to its startup config
+    discard   Throw away local edits and return to the last confirmed sync
+    revert    Push the device's running config back to a past commit
+    help      Show this message (also -h, --help)
+
+Run `c2sync COMMAND --help` for detail on a single command.
 """
 
+# 'help' is only a command; -h/--help are also honoured as arguments to a
+# command, so `c2sync init --help` prints that command's help instead of
+# starting a project for a device literally named '--help'.
+HELP_COMMANDS = ('help', '-h', '--help')
+HELP_FLAGS = ('-h', '--help')
+
+COMMAND_HELP = {
+    'init': """
+Usage: c2sync init SERIAL_DEVICE [BAUDRATE]
+       c2sync init --ssh HOST [PORT]
+
+Start a C2Sync project for one device in the current directory.
+
+Creates ./.c2sync/, initializes a git repository there, and makes the first
+commit (an empty device.config). Run `c2sync pull` next to onboard a device
+that already has a configuration.
+
+Arguments:
+  SERIAL_DEVICE  Serial port to use, e.g. /dev/ttyUSB0
+  BAUDRATE       Serial baud rate (default: 9600, or `baudrate` from the
+                 global config file)
+  HOST           Hostname or address to reach over SSH
+  PORT           SSH port (default: 22, or `ssh_port` from the global config)
+
+SSH host keys are verified against ~/.ssh/known_hosts
+""",
+
+    'pull': """
+Usage: c2sync pull [--force|-f]
+
+Fetch the device's running config and commit it as the new baseline.
+
+This is how an already-configured device gets onboarded, since `init` alone
+only creates an empty device.config. It also resyncs the baseline when the
+device was changed outside of C2Sync.
+
+Options:
+  --force, -f  Overwrite unsynced local edits. Without it, pull refuses to
+               run while you have local edits that would be lost.
+""",
+
+    'status': """
+Usage: c2sync status
+
+Show whether there are unsynced local edits or unsaved device changes.
+
+Recomputes the staged commands from device.config against the last confirmed
+sync (device.config at git HEAD), then prints the device state and a preview
+of anything staged. Read-only, and never connects to the device.
+""",
+
+    'sync': """
+Usage: c2sync sync [-y] [--rollback-on-error]
+
+Preview the staged commands and push them to the device.
+
+Shows the exact CLI commands that will be sent and asks for confirmation.
+Once the device confirms the push, C2Sync re-fetches the running config,
+writes it to device.config, and commits it, advancing the baseline.
+
+Options:
+  -y                    Skip the confirmation prompt.
+  --rollback-on-error   If the device rejects a command after earlier ones
+                        already applied, offer to undo them by pushing the
+                        device back to the pre-sync baseline.
+
+A command the device rejects aborts the batch, and the commands before it
+stay on the device. C2Sync always re-reads the running config at that point
+and moves the baseline to match, so `status` shows only what is still
+outstanding and your edits are left alone -- it does not undo the push.
+
+--rollback-on-error is opt-in because undoing means sending more config to
+a device that just rejected some, and a negation is not always a safe
+inverse. It previews and asks first unless -y is also given. `c2sync revert` 
+is the same recovery driven by hand, and stays available either way.
+""",
+
+    'commit': """
+Usage: c2sync commit [-y]
+
+Save the device's running config to its startup config.
+
+Recorded as an empty git commit, since there is no file change to stage for
+this milestone.
+
+Options:
+  -y  Skip the confirmation prompt.
+
+Refuses to run while you have unsynced local edits, which would save state
+you did not intend, and does nothing when the running config is already
+saved.
+""",
+
+    'discard': """
+Usage: c2sync discard
+
+Throw away local edits and return to the last confirmed sync.
+
+Reverts device.config to its content at git HEAD and clears staging, so the
+discarded edits cannot quietly be re-staged on the next status or sync. Does
+not touch the device.
+""",
+
+    'revert': """
+Usage: c2sync revert [COMMIT] [-y] [--force|-f]
+
+Push the device's running config back to a past commit.
+
+The recovery path for a bad push, e.g. a batch where one command was rejected
+after others had already landed. Unlike every other command, the diff is taken
+against a config fetched fresh from the device right now: after something has
+gone wrong, neither device.config nor the git baseline is guaranteed to match
+what is actually running.
+
+Arguments:
+  COMMIT  Commit to restore (default: HEAD, the last confirmed sync)
+
+Options:
+  -y           Skip the push confirmation prompt.
+  --force, -f  Overwrite unsynced local edits.
+
+-y and --force are independent on purpose: -y skips only the preview prompt,
+and --force is the only thing that permits discarding local edits.
+
+Modeled on `git revert`, it makes a new commit recording the recovered state
+so the incident stays visible in the log.
+""",
+}
+
+
+def _print_help(command=None) -> None:
+    """
+    Print help for a single command, falling back to the top-level usage for
+    a missing or unrecognized one so `c2sync help bogus` still says something
+    useful rather than erroring.
+    """
+    text = COMMAND_HELP.get(command)
+    print(text.strip('\n') if text else USAGE)
+
 def main():
-    try:
-        command = sys.argv[1]
-    except IndexError:
+    arguments = sys.argv[1:]
+
+    if not arguments:
         print(USAGE)
         return
 
-    command_arguments = sys.argv[2:]
+    command = arguments[0]
+    command_arguments = arguments[1:]
+
+    # `c2sync help COMMAND` / `c2sync --help COMMAND`, and bare `c2sync help`.
+    if command in HELP_COMMANDS:
+        _print_help(command_arguments[0] if command_arguments else None)
+        return
+
+    # `c2sync COMMAND --help`. Checked across all of the command's arguments so
+    # the flag is caught wherever it lands, including in a position the command
+    # would otherwise read as a value (`c2sync init --help` must not start a
+    # project for a device named '--help').
+    if any(a in HELP_FLAGS for a in command_arguments):
+        _print_help(command)
+        return
 
     match command:
         case 'init':
@@ -58,7 +213,8 @@ def main():
             revert(command_arguments)
         case _:
             LOGGER.error(f'Unknown command {command}')
-            print(USAGE)
+            print(USAGE, file=sys.stderr)
+            sys.exit(1)
 
 
 def init(arguments: list):
@@ -137,6 +293,13 @@ def status(arguments: list):
         print('\nStaged commands (run `c2sync sync` to push):\n')
         for line in lines:
             print(f'  {line}')
+        # label only ever shows one of the two flags (host_dirty wins), but
+        # both being set is the normal state after a partial push - so say
+        # so here rather than leaving the unsaved device changes invisible
+        # behind the staged-command list.
+        if state.device_dirty:
+            print('\nThe device also has running-config changes not yet saved to '
+                  'startup-config (run `c2sync commit`).')
     elif state.device_dirty:
         print('Running config has not been saved to startup-config yet (run `c2sync commit`).')
     else:
@@ -146,6 +309,7 @@ def status(arguments: list):
 def sync(arguments: list):
     LOGGER.debug(f'Given arguments: {arguments}')
     force = '-y' in arguments
+    rollback_on_error = '--rollback-on-error' in arguments
 
     project = _require_project()
     lines = _refresh_staging(project)
@@ -164,11 +328,26 @@ def sync(arguments: list):
 
     state_engine = StateEngine(project)
 
+    # Captured before anything is pushed: if the push aborts partway and
+    # --rollback-on-error is set, this is the state to put the device back
+    # to. Reconciliation advances HEAD, so it can't be looked up as 'HEAD'
+    # after the fact.
+    try:
+        pre_sync_head = git_ops.resolve_rev(project.PROJECT_DIR, 'HEAD')
+    except git_ops.GitError:
+        pre_sync_head = None
+
     with _connected(project) as interface:
         try:
             interface.apply_config(lines)
         except ConfigApplyError as e:
-            print(f'\nDevice rejected the configuration, nothing was applied:\n{e}')
+            landed = _reconcile_after_failed_push(project, interface, state_engine, e)
+            if landed and rollback_on_error:
+                _rollback_after_failed_push(project, interface, state_engine, pre_sync_head, force)
+            # Recompute staging against the baseline reconciliation just
+            # moved, so the state left behind is honest about what is still
+            # outstanding.
+            _refresh_staging(project)
             sys.exit(1)
 
         # The push is Netmiko-confirmed at this point: clear what's staged
@@ -335,6 +514,118 @@ def revert(arguments: list):
     state_engine.mark_device_dirty()
 
     print('\nReverted. Device has pending changes not yet saved to startup-config (run `c2sync commit`).')
+
+
+def _reconcile_after_failed_push(project: Project, interface, state_engine: StateEngine, error) -> bool:
+    """
+    Record what the device *actually* has after a push aborted partway.
+
+    apply_config aborts the batch on the first rejected command, but the
+    commands before it are already running on the device. Without this the
+    baseline still describes the pre-push device, so `status` reports
+    everything - landed and unlanded alike - as unsynced local edits.
+
+    Re-fetches the running config and commits it as the new baseline,
+    deliberately leaving EDIT_FILE alone: the user's unpushed edits are
+    still what they want, and diffing them against the corrected baseline
+    is exactly the set of commands that did not make it. Reading the device
+    is also strictly more reliable than parsing Netmiko's exception to
+    guess how many commands landed.
+
+    Returns True if anything had already landed.
+    """
+    print(f'\nDevice rejected a command, so the push stopped there:\n{error}')
+
+    try:
+        live_config = interface.get_running_config()
+    except Exception as fetch_error:
+        # Reconciliation is best-effort: losing the session here must not
+        # mask the original rejection, but the local state is now known to
+        # be untrustworthy and the user has to be told plainly.
+        print(f'\nCould not re-read the running config to see what landed: {fetch_error}\n'
+              f'Local state may not match the device - check the device directly, '
+              f'then run `c2sync pull --force` to resync the baseline.')
+        return False
+
+    landed = git_ops.commit_content(
+        project.PROJECT_DIR, project.edit_file_relpath, live_config,
+        f'c2sync sync: partial push to {project.target} (device rejected a command)',
+    )
+
+    if landed:
+        # Those commands are in running-config and not in startup-config,
+        # which is exactly what device_dirty means.
+        state_engine.mark_device_dirty()
+        print('\nCommands before the rejected one are already on the device. The baseline now\n'
+              'records what the device actually has, so `c2sync status` lists only what is\n'
+              'still outstanding. Your edits in the config file were left untouched.')
+    else:
+        print('\nNothing landed on the device - the rejected command was the first one.')
+
+    return landed
+
+
+def _rollback_after_failed_push(
+    project: Project, interface, state_engine: StateEngine, to_rev: str, skip_confirm: bool,
+) -> bool:
+    """
+    Opt-in (`sync --rollback-on-error`) undo of a partial push: diff the
+    live device against the baseline the sync started from and push the
+    correction, the same thing `c2sync revert` does by hand.
+
+    Off by default on purpose. Undoing a partial push means sending *more*
+    config to a device that just rejected some, and a negation is not
+    always a safe inverse - undoing an address or interface change can cut
+    the session doing the undoing. So it still previews and asks unless -y.
+    """
+    if to_rev is None:
+        print('\nCannot roll back: no commit to roll back to.')
+        return False
+
+    # Broad on purpose: this covers both git_ops.GitError and whatever
+    # Netmiko raises on a session that died with the failed push. Either
+    # way the fallback is the same - tell the user to drive `revert`.
+    try:
+        target_config = git_ops.show_at(project.PROJECT_DIR, to_rev, project.edit_file_relpath)
+        live_config = interface.get_running_config()
+    except Exception as e:
+        print(f'\nCould not work out a rollback: {e}\n'
+              f'Run `c2sync revert {to_rev[:8] if to_rev else ""}` once the device is reachable.')
+        return False
+
+    lines = Differ.diff_lines(live_config, target_config)
+    if not lines:
+        print('\nNothing to roll back - the device already matches the pre-sync baseline.')
+        return False
+
+    print(f'\nRolling back to {to_rev[:8]} - the following commands will be sent to the device:\n')
+    for line in lines:
+        print(f'  {line}')
+
+    if not skip_confirm and not _confirm('\nProceed with rollback?'):
+        print('Rollback aborted - the device is left in its partially-applied state.')
+        return False
+
+    try:
+        interface.apply_config(lines)
+    except ConfigApplyError as e:
+        print(f'\nThe rollback was itself rejected - the device is in a partially-reverted\n'
+              f'state and needs looking at directly:\n{e}')
+        return False
+
+    # Re-read rather than assuming the device now matches target_config
+    # verbatim, the same way sync and revert do after their own pushes.
+    rolled_back_config = interface.get_running_config()
+    git_ops.commit_content(
+        project.PROJECT_DIR, project.edit_file_relpath, rolled_back_config,
+        f'c2sync sync: rolled back partial push to {project.target}',
+    )
+    # running-config was written twice (partial push, then the undo), so it
+    # is not safe to claim it matches startup-config again.
+    state_engine.mark_device_dirty()
+    print('\nRolled back. Your edits in the config file were left untouched - fix the\n'
+          'rejected command and run `c2sync sync` again.')
+    return True
 
 
 def _require_project() -> Project:

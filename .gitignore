@@ -5,3 +5,6 @@ __pycache__/
 .env
 *.log
 c2sync.egg-info/
+.pytest_cache/
+dist/
+build/

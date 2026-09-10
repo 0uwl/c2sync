@@ -12,7 +12,7 @@ The tool lets you:
 * Push changes back to the device over serial or SSH, verified against the device's own response before anything is considered synced
 * Save the running configuration to the startup configuration
 
-Cisco IOS only, one device per project — a deliberate starting scope, not an oversight. Multi-vendor support is a possible future direction, not current scope (see Potential Future Features below).
+Cisco IOS only, one device per project — a deliberate starting scope, not an oversight. Both multi-device and multi-vendor support are wanted future directions rather than rejected ones; they are just not current scope (see Potential Future Features below).
 
 ## Core Design Principles
 
@@ -32,29 +32,213 @@ Each `c2sync init` creates a project (`./.c2sync/`) for **one device**. The proj
 
 ## Installation
 
-Not published to PyPI yet — install from a checkout of this repository:
+Not published to PyPI or any distro repository yet. There are two ways in.
+
+### From a release archive (Linux)
+
+Download the archive for your architecture from the
+[releases page](https://github.com/0uwl/c2sync/releases), along with `SHA256SUMS.txt`
+if you want to verify it (`sha256sum -c SHA256SUMS.txt`). Releases are built and
+install-tested by CI, never uploaded by hand.
+
+The archive holds a wheel for c2sync, wheels for every runtime dependency, and an
+installer. Nothing is fetched from the network at install
+time, which matters for the isolated management networks these devices usually sit on.
 
 ```bash
-pip install -e .
+tar -xzf c2sync-0.1.0-linux-x86_64.tar.gz
+./c2sync-0.1.0-linux-x86_64/install.sh
 ```
 
-Requires Python 3.11+ (for reading the optional global config file, see Configuration below) and a real or mocked device connection for anything beyond `init`/`status`/`discard` — `pull`/`sync`/`commit` all need to reach the device, over serial or SSH.
+This installs entirely under your home directory and **never needs root**:
+
+| Path | Contents |
+|---|---|
+| `~/.local/share/c2sync/venv` | Private virtualenv holding c2sync and its dependencies |
+| `~/.local/bin/c2sync` | Symlink to the launcher in that venv |
+
+The installer checks its prerequisites (Python 3.11+, `python3-venv`, `git`) and, if
+one is missing, prints the install command for your distribution and stops — it never
+invokes `sudo` or a package manager on your behalf. It also verifies the bundled
+wheels against `SHA256SUMS` before installing. If `~/.local/bin` isn't on your `PATH`
+it will say so and tell you how to add it.
+
+To remove it, run `./c2sync-0.1.0-linux-x86_64/uninstall.sh` (`-y` to skip the prompt). It deletes
+only the two paths above — your project directories and their git history are left
+alone.
+
+### From a checkout
+
+```bash
+pip install -e ".[dev]"    # omit [dev] if you don't need the test suite
+```
+
+Requires Python 3.11+ (for reading the optional global config file, see Configuration
+below) and a real or mocked device connection for anything beyond `init`/`status`/
+`discard` — `pull`/`sync`/`commit` all need to reach the device, over serial or SSH.
+
+## Building a release archive
+
+```bash
+./build.sh                    # test, build, write dist/c2sync-<version>-linux-<arch>.tar.gz
+./build.sh --skip-tests       # skip the test suite
+./build.sh --test-install     # additionally install the result in clean containers
+```
+
+The archive is roughly 14MB and bundles wheels for Python 3.11, 3.12 and 3.13. Most of
+the dependency tree is pure-python or `abi3`, but `cffi` and `pyyaml` publish
+version-specific binary wheels, so a wheelhouse built for one Python minor will not
+install on another. Vendoring all three costs about 2MB and lets the target's own pip
+select matching tags.
+
+Two constraints worth knowing:
+
+* **Architecture follows the build host.** pip matches platform tags exactly rather
+  than by minimum, and the tree mixes `manylinux_2_17`/`_2_28`/`_2_34` wheels, so
+  pinning `--platform` breaks resolution. Build on x86_64 for x86_64 targets.
+* **The build host needs an interpreter with pip.** Set `PYTHON` if the default
+  `python3` doesn't have one (`PYTHON=/usr/bin/python3 ./build.sh`). The test runner is
+  resolved separately via `PYTEST`, since the interpreter with pip and the one with
+  pytest are often not the same.
+
+`--test-install` builds a container per supported Python version, installs the archive
+as a non-root user, and checks that the command runs and the package imports — a
+missing transitive wheel only surfaces at import time, not at launch.
+
+## Continuous integration
+
+Two workflows, both on `ubuntu-24.04`.
+
+**CI** (`.github/workflows/ci.yml`) runs on pull requests to `main` and on pushes to
+`main`:
+
+* the test suite against Python 3.11, 3.12 and 3.13
+* `shellcheck` over `build.sh`, `install.sh` and `uninstall.sh`
+* a full `./build.sh --skip-tests --test-install`, which builds the archive and installs
+  it in a clean container per supported Python version
+
+The built archive is uploaded as a workflow artifact, so a PR build can be downloaded
+and tried by hand before merging.
+
+**Release** (`.github/workflows/release.yml`) runs when a GitHub release is published.
+It rebuilds the archive from scratch *with* tests, checksums it, and attaches the
+archive and `SHA256SUMS.txt` to the release. Two things have to hold or the release
+fails:
+
+* the tagged commit is contained in `main`
+* the tag matches the version in `pyproject.toml` (`v0.2.0` ↔ `version = "0.2.0"`)
+
+The second one matters because `build.sh` names the artifact from `pyproject.toml` and
+knows nothing about the tag, so without the check, releasing `v0.2.0` while
+`pyproject.toml` still said `0.1.0` would quietly attach `c2sync-0.1.0-*` to it.
+
+The runner is pinned rather than `ubuntu-latest` on purpose: manylinux wheel selection
+depends on the build host's glibc, so the runner image sets the glibc floor of every
+published archive. Pinning keeps that a deliberate change instead of one GitHub makes
+for you.
+
+## Cutting a release
+
+### 1. Bump the version on `main`
+
+The one step the pipeline cannot do for you, and the reason the version guard exists.
+
+```bash
+git checkout main && git pull
+git checkout -b release-0.2.0
+# edit pyproject.toml: version = "0.2.0"
+git commit -am "Bump version to 0.2.0"
+gh pr create --base main
+```
+
+CI runs on the PR (tests on 3.11/3.12/3.13, shellcheck, build + install-test). The
+archive is uploaded as a workflow artifact if you want to install it by hand before
+merging. Merge once it is green.
+
+### 2. Create the release from `main`
+
+```bash
+gh release create v0.2.0 --target main --title "v0.2.0" --generate-notes
+```
+
+`--target main` is what puts the new tag on `main`. The `v` prefix is optional — the
+guard strips a leading `v`, so `v0.2.0` and `0.2.0` both match `version = "0.2.0"`.
+
+A **draft** release triggers nothing; publishing it does, so notes can be staged first.
+Prereleases do trigger, deliberately.
+
+### 3. What runs
+
+```
+verify the tagged commit is an ancestor of main
+verify the tag matches pyproject.toml's version
+pip install -e ".[dev]"
+build.sh --test-install      # tests, vendor wheels x3, install-test x3
+sha256sum -> SHA256SUMS.txt
+gh release upload --clobber
+```
+
+Expect several minutes; three dependency downloads and three container builds dominate.
+
+### 4. Verify
+
+```bash
+gh release view v0.2.0
+# assets: c2sync-0.2.0-linux-x86_64.tar.gz, SHA256SUMS.txt
+```
+
+### When a guard fails
+
+The guards run *after* GitHub has published the release — a workflow cannot run before
+the event that triggers it. A failed guard therefore leaves a real, visible release with
+no archive attached.
+
+Fixing `main` and re-running the job does **not** help: the guard reads
+`pyproject.toml` from the *tagged commit*, so a tag pointing at the old commit keeps
+failing no matter what lands on `main` afterwards. Start over instead:
+
+```bash
+gh release delete v0.2.0 --cleanup-tag --yes
+# bump pyproject.toml on main properly, then create the release again
+```
+
+Re-running the workflow on a release that already has assets is safe — `gh release
+upload --clobber` replaces them rather than failing.
+
+If that after-the-fact failure window is unwelcome, the alternative is triggering on tag
+push (`on: push: tags: ['v*']`) and having the workflow call `gh release create` itself
+once the guards pass, so a bad tag never produces a visible release.
 
 ## Usage
 ### CLI Commands
+
+`c2sync --help` lists the commands:
+
 ```
-c2sync COMMAND
+Usage:
+c2sync COMMAND [ARGS]
 
 Commands:
-  init      SERIAL_DEVICE [BAUDRATE]  Start a project for one device over serial
-  init      --ssh HOST [PORT]         Start a project for one device over SSH
-  pull      [--force|-f]               Fetch the device's running config and make it the new baseline
-  status                              Show whether there are unsynced local edits or an unsaved device change
-  sync      [-y]                      Preview and push staged changes to the device
-  commit    [-y]                      Save the device's running config to its startup config
-  discard                             Revert local edits back to the last confirmed sync
-  revert    [COMMIT] [-y] [--force|-f]  Push the device back to a past commit (default: HEAD)
+    init      Start a project for one device in the current directory
+    pull      Fetch the device's running config and make it the new baseline
+    status    Show unsynced local edits and unsaved device changes
+    sync      Preview the staged commands and push them to the device
+    commit    Save the device's running config to its startup config
+    discard   Throw away local edits and return to the last confirmed sync
+    revert    Push the device's running config back to a past commit
+    help      Show this message (also -h, --help)
+
+Run `c2sync COMMAND --help` for detail on a single command.
 ```
+
+Arguments and flags live in each command's own help rather than the summary above:
+`c2sync COMMAND --help` (or `c2sync help COMMAND`) prints that command's usage,
+arguments and flags. `-h`/`--help` are recognized anywhere on the line, so
+`c2sync init --help` shows help rather than being read as a device path. Bare `c2sync`,
+`c2sync help` and `c2sync --help` all print the command list. An unrecognized command
+prints usage to stderr and exits 1.
+
+Each command is covered in detail under General workflow below.
 
 ## General workflow
 
@@ -196,6 +380,35 @@ Every key is optional and already has a working default without this file. Passw
 ## Potential Future Features
 
 Ideas that have come up but aren't built or scheduled — see `CLAUDE.md`'s Roadmap for what's actually in progress.
+
+### Multi-device support
+
+The original goal for the project, and still a wanted direction — one C2Sync project
+currently tracks exactly one device, which is the starting scope of the rewrite rather
+than a decision against fleets.
+
+Most of the groundwork is already shaped for it. `Project` (`c2sync/__init__.py`)
+already holds every per-device path as a field rather than assuming a fixed layout, and
+`git_ops` already addresses files by a path relative to the repo root
+(`Project.edit_file_relpath`), so per-device subdirectories would not require rethinking
+the git layer. What would need designing:
+
+* **One repo for the fleet, or one repo per device.** A single repo (`devices/<name>/
+  device.config`) gives you one `git log` across the fleet and lets a change spanning
+  several devices land as one reviewable commit — closest to the original intent. Per-
+  device repos keep `revert` and `discard` semantics exactly as they are today. The
+  single-repo option looks like the better fit but makes `revert`'s "restore this device
+  to commit X" need a per-device path filter rather than a whole-tree checkout.
+* **Per-device state.** `state.json`'s `host_dirty`/`device_dirty` pair is per-project
+  today and would become per-device, as would `staging.txt`.
+* **Device selection and bulk operations.** Commands would need a device selector, and
+  `status` across a fleet is genuinely useful. `sync` across many devices is the hard
+  part: partial failure (device 3 of 8 rejects a command) needs a defined outcome, and
+  the existing single-device answer — abort the batch, recover with `c2sync revert` —
+  does not obviously generalise to a fleet.
+* **Credentials.** `C2SYNC_USERNAME`/`C2SYNC_PASSWORD` assume one device. A fleet needs
+  either shared credentials or a per-device lookup, without c2sync starting to store
+  secrets itself (see Credentials above).
 
 ### Multi-vendor support
 

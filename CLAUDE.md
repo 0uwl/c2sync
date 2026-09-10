@@ -6,10 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A CLI tool that acts as a middleman between a Cisco IOS device (over console/serial or
 SSH) and a local git repository: pull the running-config to a local text file, edit it
-in a normal text editor, and push the diff back as CLI commands. Cisco IOS only is a
-**deliberate** starting scope (see Roadmap below), not an oversight — other vendors are
-a documented possible future direction (see `README.md`'s "Potential Future Features"),
-not current work.
+in a normal text editor, and push the diff back as CLI commands. Cisco IOS only, one
+device per project, is a **deliberate** starting scope (see Roadmap below), not an
+oversight — both other vendors and multi-device fleets are documented future directions
+(see `README.md`'s "Potential Future Features" and Out of current scope below), just not
+current work.
 
 There is no lint/format tooling configured in this repo (no ruff/black/flake8 config)
 — don't invent one.
@@ -19,8 +20,10 @@ There is no lint/format tooling configured in this repo (no ruff/black/flake8 co
 Requires Python >=3.11 (for stdlib `tomllib`, used to read the global config file).
 
 ```bash
-# Install (editable, with dependencies from pyproject.toml: netmiko, pytest)
-pip install -e .
+# Install (editable). pytest lives in [project.optional-dependencies] dev, NOT in
+# [project.dependencies] — build.sh vendors the latter into the shipped archive, so
+# putting a test dependency there would ship pytest and its whole tree to users.
+pip install -e ".[dev]"
 
 # Run the full test suite
 pytest c2sync/tests -q
@@ -35,14 +38,24 @@ c2sync init /dev/ttyUSB0 [BAUDRATE]     # serial transport
 c2sync init --ssh HOST [PORT]           # SSH transport
 c2sync pull [--force|-f]
 c2sync status
-c2sync sync [-y]
+c2sync sync [-y] [--rollback-on-error]
 c2sync commit [-y]
 c2sync discard
 c2sync revert [COMMIT] [-y] [--force|-f]   # COMMIT defaults to HEAD
+
+# Build a distributable archive into dist/ (see Build and distribution below)
+./build.sh                     # test, then build
+./build.sh --skip-tests
+./build.sh --test-install      # also install it in a container per Python version
+PYTHON=/usr/bin/python3 ./build.sh   # if the default python3 has no pip
 ```
 
-All tests are mocked at the Netmiko/`ConnectHandler` boundary — no real hardware,
-serial port, or network connection is needed to run the suite. `c2sync/tests/` has no `__init__.py`; pytest's
+Tests are mocked at the Netmiko/`ConnectHandler` boundary — no real hardware, serial
+port, or network connection is needed to run the suite. The one deliberate exception is
+`test_serial_project_reaches_netmikos_real_serial_driver`, which runs the real
+`ConnectHandler` and stubs one level lower (`check_serial_port` and the port open) so
+that Netmiko's own transport dispatch is actually exercised; see Device transport below
+for the bug that motivated it. It still touches no hardware. `c2sync/tests/` has no `__init__.py`; pytest's
 default rootdir insertion is what makes `from constants import PROJECT` work in test
 files, not a package import.
 
@@ -52,7 +65,8 @@ files, not a package import.
 
 `c2sync init SERIAL_DEVICE [BAUDRATE]` (serial) or `c2sync init --ssh HOST [PORT]`
 (SSH) creates `./.c2sync/` holding the entire state for **one device** — there is
-currently no multi-device registry (see the explicit non-goal in `HANDOFF.md`):
+currently no multi-device registry — a wanted future direction that is simply not built
+yet, not a rejected one (see Out of current scope below):
 
 - `device.config` (`EDIT_FILE`) — what the user edits in their text editor. Tracked in
   a real git repo (`git init` inside `PROJECT_DIR` at `init` time) — the baseline is no
@@ -79,7 +93,7 @@ relative to cwd — commands must be run from the project directory.
 | `c2sync/__init__.py` | `Project` dataclass, `init_project`/`get_project` |
 | `c2sync/connector.py` | `DeviceInterface` — Netmiko `ConnectHandler` wrapper (serial or SSH) |
 | `c2sync/differ.py` | `Differ` — real config-tree diff (`ciscoconfparse2`) → CLI commands |
-| `c2sync/git_ops.py` | Thin `git` subprocess wrapper — `init`/`commit`/`commit_empty`/`show_at_head` |
+| `c2sync/git_ops.py` | Thin `git` subprocess wrapper — `init`/`commit`/`commit_content`/`commit_empty`/`show_at`/`show_at_head`/`resolve_rev` |
 | `c2sync/user_config.py` | Reads the optional global TOML preferences file — `load()`/`config_path()` |
 | `c2sync/state_engine.py` | `StateEngine` — `host_dirty`/`device_dirty` tracking |
 | `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigSaveError`, `HostKeyRejectedError` |
@@ -136,12 +150,22 @@ or save), never assumed on send — see next section.
 
 ### Device transport (`connector.py`)
 
-`DeviceInterface` wraps Netmiko's `ConnectHandler(device_type='cisco_ios', ...)` for
-both transports — `serial_settings={port, baudrate}` when `project.TRANSPORT ==
-'serial'`, `host=..., port=...` (SSH_PORT, default 22) when `'ssh'`. That branch is the
-entire transport difference; everything past connection setup (prompt detection,
-paging, AAA login, `apply_config`/`save_config`) is identical either way since it's all
-still Netmiko talking to the same `device_type='cisco_ios'` driver. `Project.target`
+`DeviceInterface` wraps Netmiko's `ConnectHandler` for both transports —
+`device_type='cisco_ios_serial'` plus `serial_settings={port, baudrate}` when
+`project.TRANSPORT == 'serial'`, `device_type='cisco_ios'` plus `host=..., port=...`
+(SSH_PORT, default 22) when `'ssh'`. **`device_type` is part of that branch, not a
+constant**: Netmiko selects the transport class from `device_type` alone and ignores
+`serial_settings` when choosing, so plain `'cisco_ios'` is the *SSH* driver and a serial
+project built with it dies in `ConnectHandler` with `ValueError: Either ip or host must
+be set` — which was a real bug here, invisible to the suite because the transport tests
+mock `ConnectHandler` and so accept any `device_type`.
+`test_serial_project_reaches_netmikos_real_serial_driver` is the guard against a repeat:
+it lets the real `ConnectHandler` run, stubbing only `check_serial_port` (which
+validates against the *test host's* comports) and the port-opening calls, and asserts
+the resolved class. That branch is the entire transport difference; everything past
+connection setup (prompt detection, paging, AAA login, `apply_config`/`save_config`) is
+identical either way since both are the same `cisco_ios` command set over a different
+transport. `Project.target`
 (`c2sync/__init__.py`) returns whichever of `SERIAL_DEVICE`/`HOST` is relevant, so
 callers (`main.py`'s git commit messages) don't need to branch on `TRANSPORT`
 themselves.
@@ -188,6 +212,50 @@ Two things this wrapper adds on top of raw Netmiko, transport-independent:
 commit the new baseline to git, mark `device_dirty` clean) after these confirmed
 returns — never optimistically.
 
+### Partial-push reconciliation (`sync`'s error path)
+
+`apply_config` aborts the batch on the first rejected command, but the commands
+*before* it are already running on the device. Previously `sync` caught
+`ConfigApplyError`, printed "nothing was applied" (which was simply false), and exited
+without touching state — so the baseline still described the pre-push device and
+`status` reported the landed commands as unsynced local edits. That is the bug this
+path exists to fix.
+
+**Always, unconditionally:** `_reconcile_after_failed_push()` re-reads the running
+config over the still-open session and commits it as the new baseline via
+`git_ops.commit_content()`, **deliberately leaving `EDIT_FILE` alone**. The user's
+unpushed edits are still what they want, so diffing them against the corrected baseline
+yields exactly the commands that did *not* land — which is what `status` then shows.
+Reading the device is also strictly more reliable than parsing Netmiko's exception to
+infer how many commands landed. `device_dirty` is set when anything landed (those
+commands are in running-config, not startup-config). Reconciliation only ever reads from
+the device and writes locally, which is what makes it safe to do automatically; if the
+re-read itself fails, it says so and tells the user to `pull --force` rather than
+leaving them with silently wrong state.
+
+**Opt-in, via `sync --rollback-on-error`:** `_rollback_after_failed_push()` diffs the
+live device against the baseline the sync *started* from (captured as `pre_sync_head`
+before the push, since reconciliation moves `HEAD`) and pushes the correction — the same
+thing `revert` does by hand. It previews and confirms unless `-y`.
+
+Undoing is **not** the default, and the reason is not implementation cost (`revert`
+already had the machinery; wiring it in was a few lines):
+
+- It sends *more* config to a device that just rejected some. The correction can itself
+  be rejected, leaving a third state nobody predicted.
+- A negation is not always a safe inverse — undoing an address or interface change can
+  cut the session doing the undoing. This is the same unmitigated hazard listed under
+  Out of current scope ("shutting the interface the session rides on"); making rollback
+  automatic would make that hazard fire *unprompted* rather than only when a human
+  chose it.
+- The partial state is usually the one worth keeping: commands 1-5 landed, command 6 had
+  a typo, and the normal fix is to correct the typo and push the remainder.
+
+`status` prints the unsaved-startup-config note alongside staged commands when
+`device_dirty` is also set. `state.label` only ever surfaces one flag (`host_dirty`
+wins), and both being set is the normal post-partial-push state, so it would otherwise
+be invisible.
+
 ### CLI surface (`main.py`)
 
 Actual commands: `init`, `pull`, `status`, `sync`, `commit`, `discard`, `revert`. `pull`
@@ -202,7 +270,8 @@ other prompt to skip, so (like `revert`, see below) the overwrite-approval flag 
 (recomputes staging, prints state + preview, never connects to the device — this is the
 `git status` analog). `sync` pushes, then re-fetches `show running-config brief`,
 writes it to `EDIT_FILE`, and makes a real git commit in `PROJECT_DIR` (`git_ops.
-commit()`) — advancing `HEAD` *is* advancing the baseline now. `commit` refuses to run
+commit()`) — advancing `HEAD` *is* advancing the baseline now. When the push is rejected
+partway it does *not* just bail: see Partial-push reconciliation above. `commit` refuses to run
 while `host_dirty` (would save unintended state to startup-config), saves
 running→startup only when `device_dirty`, and records that milestone as an empty git
 commit (`git_ops.commit_empty()`) since there's no file content to stage for it.
@@ -241,6 +310,28 @@ commit when the recovered content already matches `HEAD`, exactly like
 already rely on). `host_dirty`/`device_dirty` transition the same way a successful
 `sync` does.
 
+`main()` handles help before dispatching, via `_print_help()` and the `COMMAND_HELP`
+dict (one entry per command, holding its own usage line, arguments, flags and the
+reasoning behind them):
+
+- `help`, `-h`, `--help` as the command, and bare `c2sync`, print the top-level `USAGE`
+  to stdout and return 0.
+- `c2sync help COMMAND` and `c2sync COMMAND --help` both print that command's entry
+  from `COMMAND_HELP`; an unrecognized topic falls back to `USAGE` rather than erroring.
+- `-h`/`--help` are matched *anywhere in a command's arguments*, not just the first
+  position. This is load-bearing, not defensive: `init` reads its first argument as a
+  serial device path, so `c2sync init --help` would otherwise start a project for a
+  device literally named `--help`. `help` is deliberately recognized only as the command
+  itself, so it stays usable as a `revert` commit-ish.
+- An unrecognized command logs an error, prints `USAGE` to **stderr** and exits **1**,
+  so a script can tell a typo from a help request.
+
+`test_every_command_has_help_text` asserts `COMMAND_HELP`'s keys match the dispatched
+commands exactly, so a new command added to the `match` without help text fails the
+suite instead of silently falling back to `USAGE`. The top-level `USAGE` is deliberately one
+line per command with no flags — arguments and flags live only in `COMMAND_HELP`, so
+there is a single place to edit when they change.
+
 `pull`, `sync`, `commit`, and `revert` all connect through `_connected()`, a
 `@contextmanager` wrapping `_connect()` in `try`/`finally` so `interface.disconnect()`
 always runs — including when a call inside the block raises (a rejected push, a
@@ -261,8 +352,11 @@ half-prompts or hangs on stdin in CI. `C2SYNC_SECRET` is checked the same way as
 Passwords/enable-secrets are **never** read from the global config file or stored
 anywhere by c2sync itself — env vars are meant to be injected by the CI system's own
 secrets manager. Combined with `sync -y`/`commit -y` (skips the confirmation prompt
-too), this is what unblocks the PR-merge-triggers-apply workflow from `HANDOFF.md`'s
-roadmap.
+too), this is what unblocks the PR-merge-triggers-apply workflow: a CI job that runs
+`c2sync sync -y` against the device once a config change is reviewed and merged, which
+is the actual payoff of tracking device config in git rather than just having a
+prettier editing loop. Note this is about a *user's* config repo (a `PROJECT_DIR`
+created by `c2sync init`), not this repo's own CI/CD.
 
 A `docker login`-style persistent credential store (i.e. one that also holds the
 password) was considered and explicitly declined: `docker login`'s own default storage
@@ -300,21 +394,135 @@ user, not written by c2sync. A malformed file prints a parse error and exits (`s
 exit(1)`) rather than silently ignoring it, since — unlike a missing file — a present
 but broken config is very likely a real mistake worth surfacing.
 
+### Build and distribution (`build.sh` / `install.sh` / `uninstall.sh`)
+
+Linux only, and deliberately just an archive plus an install script — no `.deb`/`.rpm`
+/AUR packaging, no PyPI publish. `build.sh` writes
+`dist/c2sync-<version>-linux-<arch>.tar.gz` (arch from `uname -m`; naming it now means
+adding a second arch later is additive rather than a rename of published assets)
+containing `wheels/` (a wheel for c2sync plus every runtime dependency), `install.sh`,
+`uninstall.sh`, `VERSION`, `PYTHON_VERSIONS`, and `SHA256SUMS`. Install does no network
+I/O at all, which is the point — these devices usually sit on isolated management
+networks.
+
+**The wheelhouse is built for several Python minors at once** (`PY_VERSIONS` in
+`build.sh`, currently 3.11/3.12/3.13) and this is load-bearing, not belt-and-braces.
+`cryptography`, `bcrypt` and `pynacl` ship `abi3` wheels that work across minors, but
+`cffi` and `pyyaml` ship version-specific ones (`cp311-cp311`, `cp313-cp313`, ...). A
+wheelhouse downloaded for a single Python version therefore fails to install on any
+other, and `install.sh` builds its venv from whatever `python3` the target happens to
+have. Vendoring all three costs ~2MB on a ~14MB archive.
+
+Two pip details that constrain this and will bite anyone changing it:
+
+- **No `--platform` flag.** pip matches platform tags exactly rather than by minimum,
+  and the tree mixes `manylinux_2_17`/`_2_28`/`_2_34`, so pinning any single platform
+  tag makes the resolve fail outright (`ResolutionImpossible`). Tags are inherited from
+  the build host instead, which means **the archive is architecture-specific to the
+  build host** (x86_64 in practice).
+- **`install.sh` installs the c2sync wheel by path with `--find-links` pointing at the
+  wheelhouse**, letting pip resolve the dependencies itself and pick tags matching the
+  target venv. It must *not* pass the dependency wheels by filename — with a
+  multi-version wheelhouse that forces pip to install wheels built for the wrong Python
+  minor.
+
+Two packaging traps that were live bugs here and are easy to reintroduce:
+
+- **`pyproject.toml` pins `[tool.setuptools.packages.find]` with `namespaces = false`.**
+  Without it, setuptools auto-discovery treats `c2sync/tests` (no `__init__.py`) as a
+  namespace package and ships the whole test suite inside the wheel.
+- **`pip wheel .` runs with `--no-cache-dir`.** pip caches locally-built wheels, so
+  without it a source change with no version bump silently ships a stale c2sync wheel.
+  The dependency downloads deliberately still use the cache.
+
+`build.sh` resolves the **test runner separately from the build interpreter** (`PYTEST`
+vs `PYTHON`): the interpreter that vendors wheels needs pip, the one that runs tests
+needs pytest plus the runtime deps, and those are frequently not the same (a uv-created
+`.venv` has no working pip). The `.venv` fallback uses `python -m pytest`, not the bare
+`pytest` executable — only the `-m` form puts the repo root on `sys.path`, which is what
+lets `from c2sync import ...` resolve without an install.
+
+`install.sh` is **per-user and never calls sudo**: venv in
+`${XDG_DATA_HOME:-~/.local/share}/c2sync/venv`, symlink at `~/.local/bin/c2sync`. When a
+prerequisite (Python 3.11+, venv support, `git`) is missing it prints the right command
+for the detected distro and exits rather than running a package manager itself. It
+verifies `SHA256SUMS` first, installs straight from the archive's `wheels/` (no copy
+under the install dir — that was 14MB of duplication for nothing), and warns if
+`~/.local/bin` isn't on `PATH`. Alpha's version mixed a `$HOME` venv with a
+`/usr/local/bin` launcher, which produced a system-wide command hardcoded to one user's
+home; the per-user layout is the fix for that.
+
+`uninstall.sh` reads the launcher's symlink target **before** deleting the install
+directory (`readlink -f` fails on the resulting dangling link) and removes the launcher
+only if it points into `INSTALL_DIR`, so a `c2sync` installed some other way survives.
+Project directories are never touched.
+
+`Dockerfile.test` (driven by `build.sh --test-install`, not used at runtime) installs
+the built archive as a non-root user, once per supported Python version. It checks both
+that `c2sync --help` runs and that `c2sync.main`/`connector`/`differ`/`git_ops` import
+— a missing transitive wheel only surfaces at import time, not at `--help`.
+
+### CI/CD (`.github/workflows/`)
+
+Two workflows, both pinned to `ubuntu-24.04` rather than `ubuntu-latest`. That pin is
+load-bearing: manylinux wheel selection depends on the build host's glibc, so the runner
+image sets the glibc floor of every published archive — on `ubuntu-latest`, GitHub
+rolling the image forward could raise that floor and break installs on older targets
+with no change in this repo. **The two workflows must stay pinned to the same image**,
+or releases get built on a different base than CI tested on.
+
+`ci.yml` — on `pull_request` to `main` and `push` to `main`. Three jobs: `test` (the
+suite across Python 3.11/3.12/3.13), `shellcheck` (`build.sh`/`install.sh`/
+`uninstall.sh`; shellcheck is preinstalled on GitHub runners, so this adds no repo
+config — it is not a general lint setup, and the "no lint/format tooling" note above
+still holds for Python), and `package` (`./build.sh --skip-tests --test-install`, which
+needs `test` and `shellcheck` to pass first). `--skip-tests` because `test` already ran
+the suite on every supported interpreter. The matrix **must stay in step with
+`PY_VERSIONS` in `build.sh`** — they are the same claim about which interpreters are
+supported, expressed twice.
+
+`release.yml` — on `release: published` (not `created`, which also fires for drafts, nor
+`released`, which skips prereleases). It runs `./build.sh --test-install` **with** tests
+(an artifact that reaches users is never built from an untested tree), writes an outer
+`SHA256SUMS.txt` covering the tarball itself — the `SHA256SUMS` *inside* the archive
+covers the bundled wheels and so cannot verify the download — and attaches both with
+`gh release upload --clobber`. `contents: write` is scoped to that one job; the rest is
+`contents: read`.
+
+Two guards run before the build, and both are there for concrete failure modes:
+
+- **The tagged commit must be contained in `main`.** GitHub lets a release be created
+  from any branch or arbitrary tag, so without this a release cut from a feature branch
+  publishes as though it were a main build.
+- **The tag must match `pyproject.toml`'s version** (`v0.2.0` ↔ `0.2.0`). `build.sh`
+  names the artifact from `pyproject.toml` and knows nothing about the git tag, so
+  releasing `v0.2.0` while the file still said `0.1.0` would silently attach
+  `c2sync-0.1.0-linux-x86_64.tar.gz` to the `v0.2.0` release. Cutting a release
+  therefore means bumping `pyproject.toml` on `main` first.
+
+`release.yml` installs `.[dev]` before building because `--test-install` runs the suite;
+without it `build.sh`'s `resolve_pytest` finds nothing and aborts. `ci.yml`'s `package`
+job does not need it, since it passes `--skip-tests`.
+
 ## Known constraints / simplifications
 
-- Cisco IOS only; `device_type='cisco_ios'` is hardcoded in `connector.py`, and
+- Cisco IOS only; `device_type` is hardcoded in `connector.py` to the `cisco_ios`
+  family (`cisco_ios_serial` on the serial branch — see Device transport above), and
   `Diff(..., syntax='ios')` is hardcoded in `differ.py`.
-- No *automatic* rollback if command N of a multi-command batch is rejected after
-  N-1 already landed on the device — `apply_config` aborts the batch but doesn't
-  undo what already applied. `c2sync revert` (see CLI surface above) is the manual
-  recovery path: it diffs the live device against a past commit and pushes the
-  correction.
+- Rolling back a partial push (command N of a batch rejected after N-1 landed) is
+  **opt-in**, not automatic: `apply_config` aborts the batch, and `sync` always
+  reconciles local state to what actually landed but does not undo it. `sync
+  --rollback-on-error` and `c2sync revert` are the two recovery paths — see
+  Partial-push reconciliation below for why undoing is not the default.
 - No file locking on `state.json`/`staging.txt` — fine for one interactive CLI
   invocation at a time, not safe for concurrent access.
+- The release archive is Linux-only and tied to the build host's architecture (see
+  Build and distribution above). Distro packages (`.deb`/`.rpm`) and PyPI are possible
+  later, deliberately not now.
 
 ## Roadmap and active design decisions
 
-See `HANDOFF.md` for the full write-up. Priority order, user-approved:
+Priority order, user-approved. All three have landed:
 
 1. **Real git integration — done.** `init_project` runs `git init -b main` in
    `PROJECT_DIR` and commits the initial empty `device.config`; `sync` commits the
@@ -349,6 +557,27 @@ See `HANDOFF.md` for the full write-up. Priority order, user-approved:
    `c2sync init SERIAL_DEVICE [BAUDRATE]`. `differ.py`/`state_engine.py`/the rest of
    `main.py` needed zero changes, confirming they really were transport-agnostic already
    (they operate on `Project` and CLI text, never on `DeviceInterface` internals).
+
+### Out of current scope
+
+Wanted, but not built and not currently in progress. **None of these are closed doors**
+— they are scoping decisions about sequencing, not rejections. The rule is only that
+each should be built deliberately, as its own piece of work, rather than half-emerging
+as a side effect of an unrelated change. `README.md`'s "Potential Future Features" is
+the user-facing write-up of what each would involve.
+
+- **Multi-device support.** One project directory is one device today. A fleet registry
+  was the project's original goal and remains a wanted direction; the current
+  single-device model is the revamp's starting scope, not a verdict on the idea. The
+  main open design question is one repo for the fleet versus one repo per device — see
+  `README.md` for the trade-off.
+- **Multi-vendor support.** Cisco IOS only today, and a documented future direction
+  (see Known constraints above, and `README.md` for the per-vendor analysis: NX-OS is
+  the realistic near-term target, JunOS a much bigger lift).
+- **Dry-run against a simulator.** A real safety gap rather than a feature idea:
+  nothing catches a command that is syntactically valid but operationally destructive,
+  such as shutting the interface the session rides on. `c2sync revert` is today's
+  recovery path, which is mitigation after the fact rather than prevention.
 
 ## Docs drift to be aware of
 
