@@ -50,8 +50,12 @@ c2sync revert [COMMIT] [-y] [--force|-f]   # COMMIT defaults to HEAD
 PYTHON=/usr/bin/python3 ./build.sh   # if the default python3 has no pip
 ```
 
-All tests are mocked at the Netmiko/`ConnectHandler` boundary — no real hardware,
-serial port, or network connection is needed to run the suite. `c2sync/tests/` has no `__init__.py`; pytest's
+Tests are mocked at the Netmiko/`ConnectHandler` boundary — no real hardware, serial
+port, or network connection is needed to run the suite. The one deliberate exception is
+`test_serial_project_reaches_netmikos_real_serial_driver`, which runs the real
+`ConnectHandler` and stubs one level lower (`check_serial_port` and the port open) so
+that Netmiko's own transport dispatch is actually exercised; see Device transport below
+for the bug that motivated it. It still touches no hardware. `c2sync/tests/` has no `__init__.py`; pytest's
 default rootdir insertion is what makes `from constants import PROJECT` work in test
 files, not a package import.
 
@@ -146,12 +150,22 @@ or save), never assumed on send — see next section.
 
 ### Device transport (`connector.py`)
 
-`DeviceInterface` wraps Netmiko's `ConnectHandler(device_type='cisco_ios', ...)` for
-both transports — `serial_settings={port, baudrate}` when `project.TRANSPORT ==
-'serial'`, `host=..., port=...` (SSH_PORT, default 22) when `'ssh'`. That branch is the
-entire transport difference; everything past connection setup (prompt detection,
-paging, AAA login, `apply_config`/`save_config`) is identical either way since it's all
-still Netmiko talking to the same `device_type='cisco_ios'` driver. `Project.target`
+`DeviceInterface` wraps Netmiko's `ConnectHandler` for both transports —
+`device_type='cisco_ios_serial'` plus `serial_settings={port, baudrate}` when
+`project.TRANSPORT == 'serial'`, `device_type='cisco_ios'` plus `host=..., port=...`
+(SSH_PORT, default 22) when `'ssh'`. **`device_type` is part of that branch, not a
+constant**: Netmiko selects the transport class from `device_type` alone and ignores
+`serial_settings` when choosing, so plain `'cisco_ios'` is the *SSH* driver and a serial
+project built with it dies in `ConnectHandler` with `ValueError: Either ip or host must
+be set` — which was a real bug here, invisible to the suite because the transport tests
+mock `ConnectHandler` and so accept any `device_type`.
+`test_serial_project_reaches_netmikos_real_serial_driver` is the guard against a repeat:
+it lets the real `ConnectHandler` run, stubbing only `check_serial_port` (which
+validates against the *test host's* comports) and the port-opening calls, and asserts
+the resolved class. That branch is the entire transport difference; everything past
+connection setup (prompt detection, paging, AAA login, `apply_config`/`save_config`) is
+identical either way since both are the same `cisco_ios` command set over a different
+transport. `Project.target`
 (`c2sync/__init__.py`) returns whichever of `SERIAL_DEVICE`/`HOST` is relevant, so
 callers (`main.py`'s git commit messages) don't need to branch on `TRANSPORT`
 themselves.
@@ -447,7 +461,8 @@ job does not need it, since it passes `--skip-tests`.
 
 ## Known constraints / simplifications
 
-- Cisco IOS only; `device_type='cisco_ios'` is hardcoded in `connector.py`, and
+- Cisco IOS only; `device_type` is hardcoded in `connector.py` to the `cisco_ios`
+  family (`cisco_ios_serial` on the serial branch — see Device transport above), and
   `Diff(..., syntax='ios')` is hardcoded in `differ.py`.
 - No *automatic* rollback if command N of a multi-command batch is rejected after
   N-1 already landed on the device — `apply_config` aborts the batch but doesn't

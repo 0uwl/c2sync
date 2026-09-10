@@ -30,6 +30,10 @@ def test_serial_project_passes_serial_settings_to_connecthandler():
     kwargs = mock_handler.call_args.kwargs
     assert kwargs['serial_settings'] == {'port': '/dev/ttyUSB0', 'baudrate': 115200}
     assert 'host' not in kwargs
+    # Netmiko selects the transport class from device_type alone - plain
+    # 'cisco_ios' is the SSH driver and dies with "Either ip or host must be
+    # set" on a serial project, serial_settings notwithstanding.
+    assert kwargs['device_type'] == 'cisco_ios_serial'
 
 
 def test_ssh_project_passes_host_and_port_to_connecthandler():
@@ -42,6 +46,7 @@ def test_ssh_project_passes_host_and_port_to_connecthandler():
     assert kwargs['host'] == '10.0.0.1'
     assert kwargs['port'] == 2222
     assert 'serial_settings' not in kwargs
+    assert kwargs['device_type'] == 'cisco_ios'
 
 
 def test_ssh_project_verifies_host_keys_instead_of_trusting_any():
@@ -297,3 +302,24 @@ def test_initialize_session_skips_enable_when_already_privileged():
     interface.initialize_session()
 
     mock_conn.enable.assert_not_called()
+
+
+def test_serial_project_reaches_netmikos_real_serial_driver():
+    """
+    The mocked transport tests above can't catch a device_type that Netmiko
+    dispatches to the wrong driver - the mock accepts any kwargs. This one
+    lets the real ConnectHandler run, stubbing only the part that would
+    touch a physical port, so a serial project that resolves to the SSH
+    class fails here (ValueError: "Either ip or host must be set") instead
+    of only on real hardware.
+    """
+    serial_project = Project(TRANSPORT='serial', SERIAL_DEVICE='/dev/ttyUSB0', BAUDRATE=115200)
+
+    # check_serial_port validates the path against the *test host's* real
+    # comports, which has nothing to do with what we're asserting here.
+    with patch('netmiko.base_connection.check_serial_port', side_effect=lambda p: p), \
+         patch('netmiko.base_connection.BaseConnection._open'), \
+         patch('netmiko.base_connection.BaseConnection.session_preparation'):
+        interface = DeviceInterface(serial_project, username='admin', password='pw')
+
+    assert type(interface.conn).__name__ == 'CiscoIosSerial'

@@ -61,16 +61,23 @@ class DeviceInterface:
             # user's own ~/.ssh/known_hosts instead, the same trust model a
             # plain `ssh` client uses.
             transport_kwargs = {
+                'device_type': 'cisco_ios',
                 'host': project.HOST,
                 'port': project.SSH_PORT,
                 'ssh_strict': True,
                 'system_host_keys': True,
             }
         else:
-            transport_kwargs = {'serial_settings': {'port': project.SERIAL_DEVICE, 'baudrate': project.BAUDRATE}}
+            # Netmiko picks the transport from device_type, not from the
+            # presence of serial_settings: plain 'cisco_ios' is the SSH
+            # class and rejects a connection with no host ("Either ip or
+            # host must be set"). The serial driver is its own platform.
+            transport_kwargs = {
+                'device_type': 'cisco_ios_serial',
+                'serial_settings': {'port': project.SERIAL_DEVICE, 'baudrate': project.BAUDRATE},
+            }
 
         connect_kwargs = dict(
-            device_type='cisco_ios',
             timeout=project.TIMEOUT,
             username=username,
             password=password,
