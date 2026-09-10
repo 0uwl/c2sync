@@ -152,7 +152,7 @@ def _trust_new_host_key(host: str, port: int) -> None:
                 server_key = transport.get_remote_server_key()
             finally:
                 transport.close()
-    except OSError as e:
+    except (OSError, paramiko.SSHException) as e:
         raise HostKeyRejectedError(f'Could not reach {host}:{port} to verify its host key: {e}') from e
 
     fingerprint = base64.b64encode(hashlib.sha256(server_key.asbytes()).digest()).decode().rstrip('=')
@@ -164,13 +164,17 @@ def _trust_new_host_key(host: str, port: int) -> None:
     if answer != 'yes':
         raise HostKeyRejectedError(f'Host key for {host!r} was not trusted.')
 
-    host_keys = paramiko.HostKeys()
-    if os.path.exists(KNOWN_HOSTS_PATH):
-        host_keys.load(KNOWN_HOSTS_PATH)
-
+    # Append rather than load()+add()+save(): this only ever runs once
+    # paramiko has already told us the host has no known_hosts entry, so
+    # there's nothing to merge. Appending also means never parsing the
+    # user's existing file, which sidesteps two real problems with the
+    # load/save round-trip: it drops every comment/blank line on save,
+    # and load() raises uncaught on marker-prefixed lines (@revoked,
+    # @cert-authority) that a real known_hosts file can legitimately have.
     server_hostkey_name = host if port == 22 else f'[{host}]:{port}'
-    host_keys.add(server_hostkey_name, server_key.get_name(), server_key)
+    line = paramiko.hostkeys.HostKeyEntry(hostnames=[server_hostkey_name], key=server_key).to_line()
 
     os.makedirs(os.path.dirname(KNOWN_HOSTS_PATH), exist_ok=True)
-    host_keys.save(KNOWN_HOSTS_PATH)
+    with open(KNOWN_HOSTS_PATH, 'a') as file:
+        file.write(line)
     print(f"Warning: Permanently added '{host}' ({server_key.get_name()}) to the list of known hosts.")

@@ -1,3 +1,4 @@
 netmiko
 ciscoconfparse2
+paramiko
 pytest

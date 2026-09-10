@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
   "netmiko",
   "ciscoconfparse2",
+  "paramiko",
   "pytest"
 ]
 
