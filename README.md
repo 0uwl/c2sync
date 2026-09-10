@@ -177,7 +177,7 @@ prompt_regex = '[>#]\s?$'
 
 Every key is optional and already has a working default without this file. Passwords and enable-secrets are intentionally never stored here — see Credentials above.
 
-`prompt_for_unknown_ssh_hosts` defaults to `false`: an SSH host not already in your `~/.ssh/known_hosts` fails to connect (see Init above) rather than prompting. Set it to `true` to get an OpenSSH-style prompt instead — fingerprint shown, `yes`/`no` — and a `yes` adds the key to `known_hosts` for next time. A host whose key *changed* (as opposed to one that's simply new) always fails hard either way; this setting only ever affects genuinely first-time connections.
+`prompt_for_unknown_ssh_hosts` defaults to `false`: an SSH host not already in your `~/.ssh/known_hosts` fails to connect (see Init above) rather than prompting. Set it to `true` to get an OpenSSH-style prompt instead (fingerprint shown, `yes`/`no`), and a `yes` adds the key to `known_hosts` for next time. A host whose key *changed* (as opposed to one that's simply new) always fails hard either way; this setting only ever affects genuinely first-time connections.
 
 ## Potential Future Features
 
