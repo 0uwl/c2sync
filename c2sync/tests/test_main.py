@@ -495,3 +495,101 @@ def test_revert_prompts_and_aborts_without_dash_y(project):
 
     revert_conn.send_config_set.assert_not_called()
     assert git_ops.resolve_rev(project.PROJECT_DIR, 'HEAD') == head_before
+
+
+def test_revert_refuses_when_host_dirty_without_force(project):
+    _sync_known_good(project, ['interface Gi1/0/1', ' shutdown'])
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown', ' description unsynced'])
+    main_module.status([])
+    assert StateEngine(project).state.host_dirty is True
+
+    with patch('c2sync.connector.ConnectHandler') as mock_handler:
+        with pytest.raises(SystemExit):
+            main_module.revert(['-y'])
+        mock_handler.assert_not_called()
+
+    # EDIT_FILE must be untouched - refusing must happen before ever
+    # connecting or overwriting anything.
+    with open(project.EDIT_FILE) as file:
+        assert 'description unsynced' in file.read()
+
+
+def test_revert_overwrites_host_dirty_edits_with_force(project):
+    _sync_known_good(project, ['interface Gi1/0/1', ' shutdown'])
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown', ' description unsynced'])
+    main_module.status([])
+    assert StateEngine(project).state.host_dirty is True
+
+    revert_conn = MagicMock()
+    revert_conn.check_enable_mode.return_value = True
+    revert_conn.send_config_set.return_value = 'ok'
+    revert_conn.send_command.side_effect = [
+        'interface Gi1/0/1\n',
+        'interface Gi1/0/1\n shutdown\n',
+    ]
+
+    patches = _mocked_connect(revert_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.revert(['-y', '--force'])
+
+    with open(project.EDIT_FILE) as file:
+        assert 'description unsynced' not in file.read()
+    assert StateEngine(project).state.host_dirty is False
+
+
+def test_revert_short_dash_f_also_overwrites_host_dirty_edits(project):
+    _sync_known_good(project, ['interface Gi1/0/1', ' shutdown'])
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown', ' description unsynced'])
+    main_module.status([])
+
+    revert_conn = MagicMock()
+    revert_conn.check_enable_mode.return_value = True
+    revert_conn.send_config_set.return_value = 'ok'
+    revert_conn.send_command.side_effect = [
+        'interface Gi1/0/1\n',
+        'interface Gi1/0/1\n shutdown\n',
+    ]
+
+    patches = _mocked_connect(revert_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.revert(['-y', '-f'])
+
+    assert StateEngine(project).state.host_dirty is False
+
+
+def test_revert_force_alone_does_not_skip_the_push_confirmation(project):
+    """
+    --force only concerns the host_dirty overwrite, not the push-preview
+    prompt - the two are independent flags on purpose.
+    """
+    _sync_known_good(project, ['interface Gi1/0/1', ' shutdown'])
+
+    revert_conn = MagicMock()
+    revert_conn.check_enable_mode.return_value = True
+    revert_conn.send_command.return_value = 'interface Gi1/0/1\n'
+
+    patches = _mocked_connect(revert_conn)
+    with patches[0], patches[2], patch('builtins.input', side_effect=['admin', 'n']):
+        main_module.revert(['--force'])
+
+    revert_conn.send_config_set.assert_not_called()
+
+
+def test_revert_disconnects_even_if_fetching_live_config_raises(project):
+    """
+    Regression test for the disconnect leak a rejected/failed mid-flow call
+    used to cause: _connected's try/finally must run disconnect() even when
+    get_running_config() itself raises, not just on the expected error paths.
+    """
+    _sync_known_good(project, ['interface Gi1/0/1', ' shutdown'])
+
+    revert_conn = MagicMock()
+    revert_conn.check_enable_mode.return_value = True
+    revert_conn.send_command.side_effect = RuntimeError('session dropped')
+
+    patches = _mocked_connect(revert_conn)
+    with patches[0], patches[1], patches[2]:
+        with pytest.raises(RuntimeError):
+            main_module.revert(['-y'])
+
+    revert_conn.disconnect.assert_called_once()

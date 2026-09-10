@@ -45,6 +45,15 @@ class Project:
         """
         return self.HOST if self.TRANSPORT == 'ssh' else self.SERIAL_DEVICE
 
+    @property
+    def edit_file_relpath(self) -> str:
+        """
+        EDIT_FILE's path relative to PROJECT_DIR - what git_ops calls need
+        (they run with `git -C PROJECT_DIR ...`), instead of every caller
+        recomputing os.path.relpath(EDIT_FILE, PROJECT_DIR) itself.
+        """
+        return os.path.relpath(self.EDIT_FILE, self.PROJECT_DIR)
+
     def to_dict(self):
         return {
         'TRANSPORT': self.TRANSPORT,

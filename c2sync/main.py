@@ -3,6 +3,8 @@ import logging
 import os
 import sys
 
+from contextlib import contextmanager
+
 from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutException
 
 from c2sync import Project, get_project, git_ops, init_project, user_config
@@ -25,6 +27,8 @@ Commands:
     commit       Issues the command to save the running config to the startup config on the device
     discard      Cancel the current C2Sync session
     revert       Push the device's running config back to a past commit (HEAD by default)
+                 [COMMIT] [-y] [--force|-f]  -y skips the push confirmation; --force/-f
+                 is required to overwrite unsynced local edits
 """
 
 def main():
@@ -102,17 +106,13 @@ def pull(arguments: list):
               '`c2sync discard` first, or `c2sync pull -y` to overwrite them anyway.')
         sys.exit(1)
 
-    interface = _connect(project)
-    try:
+    with _connected(project) as interface:
         new_config = interface.get_running_config()
-    finally:
-        interface.disconnect()
 
     with open(project.EDIT_FILE, 'w') as file:
         file.write(new_config)
 
-    edit_file_name = os.path.relpath(project.EDIT_FILE, project.PROJECT_DIR)
-    git_ops.commit(project.PROJECT_DIR, [edit_file_name], f'c2sync pull: fetched from {project.target}')
+    git_ops.commit(project.PROJECT_DIR, [project.edit_file_relpath], f'c2sync pull: fetched from {project.target}')
 
     Differ(project).clear_staging()
     StateEngine(project).mark_host_clean()
@@ -158,32 +158,32 @@ def sync(arguments: list):
         return
 
     state_engine = StateEngine(project)
-    interface = _connect(project)
 
-    try:
-        interface.apply_config(lines)
-    except ConfigApplyError as e:
-        print(f'\nDevice rejected the configuration, nothing was applied:\n{e}')
-        interface.disconnect()
-        sys.exit(1)
+    with _connected(project) as interface:
+        try:
+            interface.apply_config(lines)
+        except ConfigApplyError as e:
+            print(f'\nDevice rejected the configuration, nothing was applied:\n{e}')
+            sys.exit(1)
 
-    # The push is Netmiko-confirmed at this point: clear what's staged and
-    # record that the device now has unsaved (running-config-only) changes.
-    Differ(project).clear_staging()
-    state_engine.mark_host_clean()
-    state_engine.mark_device_dirty()
+        # The push is Netmiko-confirmed at this point: clear what's staged
+        # and record that the device now has unsaved (running-config-only)
+        # changes.
+        Differ(project).clear_staging()
+        state_engine.mark_host_clean()
+        state_engine.mark_device_dirty()
 
-    # The device is now the source of truth again - refresh the file the
-    # user edits and commit it, so git HEAD (the baseline we diff against
-    # next time) advances the way a `git commit` advances the index.
-    new_config = interface.get_running_config()
+        # The device is now the source of truth again - refresh the file
+        # the user edits and commit it, so git HEAD (the baseline we diff
+        # against next time) advances the way a `git commit` advances the
+        # index.
+        new_config = interface.get_running_config()
+
     with open(project.EDIT_FILE, 'w') as file:
         file.write(new_config)
 
-    edit_file_name = os.path.relpath(project.EDIT_FILE, project.PROJECT_DIR)
-    git_ops.commit(project.PROJECT_DIR, [edit_file_name], f'c2sync sync: pushed to {project.target}')
+    git_ops.commit(project.PROJECT_DIR, [project.edit_file_relpath], f'c2sync sync: pushed to {project.target}')
 
-    interface.disconnect()
     print('\nSynced. Device has pending changes not yet saved to startup-config (run `c2sync commit`).')
 
 
@@ -207,18 +207,15 @@ def commit(arguments: list):
         print('Aborted.')
         return
 
-    interface = _connect(project)
-
-    try:
-        interface.save_config()
-    except ConfigSaveError as e:
-        print(f'\nFailed to save configuration on the device:\n{e}')
-        interface.disconnect()
-        sys.exit(1)
+    with _connected(project) as interface:
+        try:
+            interface.save_config()
+        except ConfigSaveError as e:
+            print(f'\nFailed to save configuration on the device:\n{e}')
+            sys.exit(1)
 
     state_engine.mark_device_clean()
     git_ops.commit_empty(project.PROJECT_DIR, f'c2sync commit: saved to startup-config on {project.target}')
-    interface.disconnect()
     print('\nSaved. Device is now synced.')
 
 
@@ -230,8 +227,7 @@ def discard(arguments: list):
     # Revert the edit file itself, not just the staging file - otherwise
     # the discarded edits would just get re-staged the next time status/sync
     # recomputes the diff against the baseline.
-    edit_file_name = os.path.relpath(project.EDIT_FILE, project.PROJECT_DIR)
-    baseline = git_ops.show_at_head(project.PROJECT_DIR, edit_file_name) or ''
+    baseline = git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) or ''
     with open(project.EDIT_FILE, 'w') as file:
         file.write(baseline)
 
@@ -256,12 +252,22 @@ def revert(arguments: list):
     incident stays visible in `git log` instead of being erased.
     """
     LOGGER.debug(f'Given arguments: {arguments}')
-    force = '-y' in arguments
-    positional = [arg for arg in arguments if arg != '-y']
+    skip_confirm = '-y' in arguments
+    # Deliberately separate from -y: -y should only ever mean "skip the
+    # push-preview prompt", never "also silently overwrite local edits I
+    # didn't know I had" - a user reaching for -y just to move past the
+    # confirmation shouldn't be able to lose work by accident.
+    force_overwrite = '--force' in arguments or '-f' in arguments
+    positional = [arg for arg in arguments if arg not in ('-y', '--force', '-f')]
     target_rev = positional[0] if positional else 'HEAD'
 
     project = _require_project()
-    edit_file_name = os.path.relpath(project.EDIT_FILE, project.PROJECT_DIR)
+
+    state = StateEngine(project).state
+    if state.host_dirty and not force_overwrite:
+        print('You have unsynced local edits that would be overwritten by revert. Run '
+              '`c2sync discard` first, or `c2sync revert --force` (or `-f`) to overwrite them anyway.')
+        sys.exit(1)
 
     try:
         resolved_sha = git_ops.resolve_rev(project.PROJECT_DIR, target_rev)
@@ -270,49 +276,46 @@ def revert(arguments: list):
         sys.exit(1)
 
     try:
-        target_config = git_ops.show_at(project.PROJECT_DIR, resolved_sha, edit_file_name)
+        target_config = git_ops.show_at(project.PROJECT_DIR, resolved_sha, project.edit_file_relpath)
     except git_ops.GitError as e:
-        print(f"'{edit_file_name}' is not tracked at {resolved_sha[:8]}: {e}")
+        print(f"'{project.edit_file_relpath}' is not tracked at {resolved_sha[:8]}: {e}")
         sys.exit(1)
 
-    interface = _connect(project)
-    live_config = interface.get_running_config()
+    with _connected(project) as interface:
+        live_config = interface.get_running_config()
 
-    lines = Differ.diff_lines(live_config, target_config)
+        lines = Differ.diff_lines(live_config, target_config)
 
-    if not lines:
-        print(f'Running config already matches {resolved_sha[:8]}. Nothing to revert.')
-        interface.disconnect()
-        return
+        if not lines:
+            print(f'Running config already matches {resolved_sha[:8]}. Nothing to revert.')
+            return
 
-    print(f'Reverting running config to {resolved_sha[:8]} - the following commands will be sent to the device:\n')
-    for line in lines:
-        print(f'  {line}')
+        print(f'Reverting running config to {resolved_sha[:8]} - the following commands will be sent to the device:\n')
+        for line in lines:
+            print(f'  {line}')
 
-    if not force and not _confirm('\nProceed?'):
-        print('Aborted.')
-        interface.disconnect()
-        return
+        if not skip_confirm and not _confirm('\nProceed?'):
+            print('Aborted.')
+            return
 
-    try:
-        interface.apply_config(lines)
-    except ConfigApplyError as e:
-        print(f'\nDevice rejected the revert - it may now be in a partially-applied '
-              f'state, check `c2sync status` and the device directly:\n{e}')
-        interface.disconnect()
-        sys.exit(1)
+        try:
+            interface.apply_config(lines)
+        except ConfigApplyError as e:
+            print(f'\nDevice rejected the revert - it may now be in a partially-applied '
+                  f'state, check `c2sync status` and the device directly:\n{e}')
+            sys.exit(1)
 
-    # The revert push is Netmiko-confirmed at this point. Re-fetch rather
-    # than assuming the device now matches target_config verbatim - same
-    # reasoning `sync` already follows after its own push.
-    new_config = interface.get_running_config()
-    interface.disconnect()
+        # The revert push is Netmiko-confirmed at this point. Re-fetch
+        # rather than assuming the device now matches target_config
+        # verbatim - same reasoning `sync` already follows after its own
+        # push.
+        new_config = interface.get_running_config()
 
     with open(project.EDIT_FILE, 'w') as file:
         file.write(new_config)
 
     git_ops.commit(
-        project.PROJECT_DIR, [edit_file_name],
+        project.PROJECT_DIR, [project.edit_file_relpath],
         f'c2sync revert: reverted {project.target} to {resolved_sha[:8]}'
     )
 
@@ -356,6 +359,22 @@ def _refresh_staging(project: Project) -> list[str]:
 
 def _confirm(prompt: str) -> bool:
     return input(f'{prompt} [y/N] ').strip().lower() == 'y'
+
+
+@contextmanager
+def _connected(project: Project):
+    """
+    Connect and guarantee disconnect() runs even if the caller's block
+    raises (a rejected push, a dropped session mid-fetch, ...) or returns
+    early - `finally` inside a generator-based context manager still runs
+    on any of those, SystemExit included, so callers no longer need to
+    scatter interface.disconnect() before every exit point themselves.
+    """
+    interface = _connect(project)
+    try:
+        yield interface
+    finally:
+        interface.disconnect()
 
 
 def _connect(project: Project) -> DeviceInterface:

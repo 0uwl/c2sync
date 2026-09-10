@@ -38,7 +38,7 @@ c2sync status
 c2sync sync [-y]
 c2sync commit [-y]
 c2sync discard
-c2sync revert [COMMIT] [-y]     # COMMIT defaults to HEAD
+c2sync revert [COMMIT] [-y] [--force|-f]   # COMMIT defaults to HEAD
 ```
 
 All tests are mocked at the Netmiko/`ConnectHandler` boundary — no real hardware,
@@ -213,24 +213,41 @@ staging) so discarded edits can't get silently re-staged on the next check.
 repo is a normal git repo the user can drive directly with `git` or push to
 GitHub/GitLab for review.
 
-`revert [COMMIT] [-y]` is the manual recovery path for a bad push (e.g. a batch
-where command 3 of 8 got rejected after 1-2 already landed) — see Known constraints.
-`COMMIT` defaults to `HEAD` (the last confirmed sync). Unlike every other command
-here, it diffs against a config fetched **fresh from the device right now**, not
-`EDIT_FILE` — after something's gone wrong, neither `EDIT_FILE` nor the git baseline
-is guaranteed to reflect what's actually running, only the device itself is.
-Sequence: `git_ops.resolve_rev()` the target (raises `git_ops.GitError` on a typo'd
-commit — this must never silently fall back to an empty target, which would try to
-strip the entire device config), `git_ops.show_at()` that commit's `device.config`
-(deliberately not the soft-fallback `show_at_head()` — a bad rev here must be a hard
-error too), connect and fetch the live running-config, `Differ.diff_lines(live,
-target)`, preview and confirm (or `-y`), `apply_config()`. On success it re-fetches
-and writes `EDIT_FILE`, same as `sync`. Modeled on `git revert`, not `git reset
---hard`: it makes a **new** commit recording the recovered state rather than
-rewinding `HEAD`, so the incident stays visible in `git log` (and is a no-op commit
-when the recovered content already matches `HEAD`, exactly like `git_ops.commit()`'s
-existing "nothing changed" short-circuit that `sync`/`pull` already rely on).
-`host_dirty`/`device_dirty` transition the same way a successful `sync` does.
+`revert [COMMIT] [-y] [--force|-f]` is the manual recovery path for a bad push (e.g. a
+batch where command 3 of 8 got rejected after 1-2 already landed) — see Known
+constraints. `COMMIT` defaults to `HEAD` (the last confirmed sync). Unlike every other
+command here, it diffs against a config fetched **fresh from the device right now**,
+not `EDIT_FILE` — after something's gone wrong, neither `EDIT_FILE` nor the git
+baseline is guaranteed to reflect what's actually running, only the device itself is.
+Refuses to run while `host_dirty` unless `--force`/`-f` is passed — reverting
+overwrites `EDIT_FILE` with the post-revert device state, which would otherwise
+silently discard unsynced local edits. `-y` and `--force` are deliberately independent
+flags: `-y` only skips the push-preview confirmation, `--force` is the only thing that
+permits overwriting `host_dirty` edits — a user reaching for `-y` just to skip the
+prompt shouldn't be able to lose local work as a side effect they didn't ask for.
+Sequence: the `host_dirty` check, then `git_ops.resolve_rev()` the target (raises
+`git_ops.GitError` on a typo'd commit — this must never silently fall back to an empty
+target, which would try to strip the entire device config), `git_ops.show_at()` that
+commit's `device.config` (deliberately not the soft-fallback `show_at_head()` — a bad
+rev here must be a hard error too), connect and fetch the live running-config,
+`Differ.diff_lines(live, target)`, preview and confirm (or `-y`), `apply_config()`. On
+success it re-fetches and writes `EDIT_FILE`, same as `sync`. Modeled on `git revert`,
+not `git reset --hard`: it makes a **new** commit recording the recovered state rather
+than rewinding `HEAD`, so the incident stays visible in `git log` (and is a no-op
+commit when the recovered content already matches `HEAD`, exactly like
+`git_ops.commit()`'s existing "nothing changed" short-circuit that `sync`/`pull`
+already rely on). `host_dirty`/`device_dirty` transition the same way a successful
+`sync` does.
+
+`pull`, `sync`, `commit`, and `revert` all connect through `_connected()`, a
+`@contextmanager` wrapping `_connect()` in `try`/`finally` so `interface.disconnect()`
+always runs — including when a call inside the block raises (a rejected push, a
+dropped session mid-fetch) or the function returns early — rather than every command
+scattering its own `interface.disconnect()` before each exit point. `Project.
+edit_file_relpath` (`c2sync/__init__.py`) is the one place `os.path.relpath(EDIT_FILE,
+PROJECT_DIR)` is computed — every `git_ops` call site (which run with `git -C
+PROJECT_DIR ...`, so need the path relative to it) uses that property instead of
+recomputing it.
 
 `_connect()` in `main.py` resolves `username` from `C2SYNC_USERNAME`, then the global
 config's `username` key (see Global user config below); `password` only from
