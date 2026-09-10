@@ -32,13 +32,73 @@ Each `c2sync init` creates a project (`./.c2sync/`) for **one device**. The proj
 
 ## Installation
 
-Not published to PyPI yet — install from a checkout of this repository:
+Not published to PyPI or any distro repository yet. There are two ways in.
+
+### From a release archive (Linux)
+
+`build.sh` produces a single `.tar.gz` holding a wheel for c2sync, wheels for every
+runtime dependency, and an installer. Nothing is fetched from the network at install
+time, which matters for the isolated management networks these devices usually sit on.
 
 ```bash
-pip install -e .
+tar -xzf c2sync-0.1.0.tar.gz
+./c2sync-0.1.0/install.sh
 ```
 
-Requires Python 3.11+ (for reading the optional global config file, see Configuration below) and a real or mocked device connection for anything beyond `init`/`status`/`discard` — `pull`/`sync`/`commit` all need to reach the device, over serial or SSH.
+This installs entirely under your home directory and **never needs root**:
+
+| Path | Contents |
+|---|---|
+| `~/.local/share/c2sync/venv` | Private virtualenv holding c2sync and its dependencies |
+| `~/.local/bin/c2sync` | Symlink to the launcher in that venv |
+
+The installer checks its prerequisites (Python 3.11+, `python3-venv`, `git`) and, if
+one is missing, prints the install command for your distribution and stops — it never
+invokes `sudo` or a package manager on your behalf. It also verifies the bundled
+wheels against `SHA256SUMS` before installing. If `~/.local/bin` isn't on your `PATH`
+it will say so and tell you how to add it.
+
+To remove it, run `./c2sync-0.1.0/uninstall.sh` (`-y` to skip the prompt). It deletes
+only the two paths above — your project directories and their git history are left
+alone.
+
+### From a checkout
+
+```bash
+pip install -e ".[dev]"    # omit [dev] if you don't need the test suite
+```
+
+Requires Python 3.11+ (for reading the optional global config file, see Configuration
+below) and a real or mocked device connection for anything beyond `init`/`status`/
+`discard` — `pull`/`sync`/`commit` all need to reach the device, over serial or SSH.
+
+## Building a release archive
+
+```bash
+./build.sh                    # test, build, and write dist/c2sync-<version>.tar.gz
+./build.sh --skip-tests       # skip the test suite
+./build.sh --test-install     # additionally install the result in clean containers
+```
+
+The archive is roughly 14MB and bundles wheels for Python 3.11, 3.12 and 3.13. Most of
+the dependency tree is pure-python or `abi3`, but `cffi` and `pyyaml` publish
+version-specific binary wheels, so a wheelhouse built for one Python minor will not
+install on another. Vendoring all three costs about 2MB and lets the target's own pip
+select matching tags.
+
+Two constraints worth knowing:
+
+* **Architecture follows the build host.** pip matches platform tags exactly rather
+  than by minimum, and the tree mixes `manylinux_2_17`/`_2_28`/`_2_34` wheels, so
+  pinning `--platform` breaks resolution. Build on x86_64 for x86_64 targets.
+* **The build host needs an interpreter with pip.** Set `PYTHON` if the default
+  `python3` doesn't have one (`PYTHON=/usr/bin/python3 ./build.sh`). The test runner is
+  resolved separately via `PYTEST`, since the interpreter with pip and the one with
+  pytest are often not the same.
+
+`--test-install` builds a container per supported Python version, installs the archive
+as a non-root user, and checks that the command runs and the package imports — a
+missing transitive wheel only surfaces at import time, not at launch.
 
 ## Usage
 ### CLI Commands

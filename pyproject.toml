@@ -11,7 +11,13 @@ requires-python = ">=3.11"
 dependencies = [
   "netmiko",
   "ciscoconfparse2",
-  "paramiko",
+  "paramiko"
+]
+
+# Test-only. Kept out of [project.dependencies] so build.sh does not vendor
+# pytest and its tree into the distributed archive.
+[project.optional-dependencies]
+dev = [
   "pytest"
 ]
 
@@ -21,3 +27,10 @@ c2sync = "c2sync.main:main"
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
+
+# Without this, setuptools' auto-discovery picks up c2sync/tests as a namespace
+# package (it has no __init__.py) and ships the whole test suite inside the wheel.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["c2sync"]
+namespaces = false

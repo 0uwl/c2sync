@@ -19,8 +19,10 @@ There is no lint/format tooling configured in this repo (no ruff/black/flake8 co
 Requires Python >=3.11 (for stdlib `tomllib`, used to read the global config file).
 
 ```bash
-# Install (editable, with dependencies from pyproject.toml: netmiko, pytest)
-pip install -e .
+# Install (editable). pytest lives in [project.optional-dependencies] dev, NOT in
+# [project.dependencies] — build.sh vendors the latter into the shipped archive, so
+# putting a test dependency there would ship pytest and its whole tree to users.
+pip install -e ".[dev]"
 
 # Run the full test suite
 pytest c2sync/tests -q
@@ -39,6 +41,12 @@ c2sync sync [-y]
 c2sync commit [-y]
 c2sync discard
 c2sync revert [COMMIT] [-y] [--force|-f]   # COMMIT defaults to HEAD
+
+# Build a distributable archive into dist/ (see Build and distribution below)
+./build.sh                     # test, then build
+./build.sh --skip-tests
+./build.sh --test-install      # also install it in a container per Python version
+PYTHON=/usr/bin/python3 ./build.sh   # if the default python3 has no pip
 ```
 
 All tests are mocked at the Netmiko/`ConnectHandler` boundary — no real hardware,
@@ -300,6 +308,74 @@ user, not written by c2sync. A malformed file prints a parse error and exits (`s
 exit(1)`) rather than silently ignoring it, since — unlike a missing file — a present
 but broken config is very likely a real mistake worth surfacing.
 
+### Build and distribution (`build.sh` / `install.sh` / `uninstall.sh`)
+
+Linux only, and deliberately just an archive plus an install script — no `.deb`/`.rpm`
+/AUR packaging, no PyPI publish. `build.sh` writes `dist/c2sync-<version>.tar.gz`
+containing `wheels/` (a wheel for c2sync plus every runtime dependency), `install.sh`,
+`uninstall.sh`, `VERSION`, `PYTHON_VERSIONS`, and `SHA256SUMS`. Install does no network
+I/O at all, which is the point — these devices usually sit on isolated management
+networks.
+
+**The wheelhouse is built for several Python minors at once** (`PY_VERSIONS` in
+`build.sh`, currently 3.11/3.12/3.13) and this is load-bearing, not belt-and-braces.
+`cryptography`, `bcrypt` and `pynacl` ship `abi3` wheels that work across minors, but
+`cffi` and `pyyaml` ship version-specific ones (`cp311-cp311`, `cp313-cp313`, ...). A
+wheelhouse downloaded for a single Python version therefore fails to install on any
+other, and `install.sh` builds its venv from whatever `python3` the target happens to
+have. Vendoring all three costs ~2MB on a ~14MB archive.
+
+Two pip details that constrain this and will bite anyone changing it:
+
+- **No `--platform` flag.** pip matches platform tags exactly rather than by minimum,
+  and the tree mixes `manylinux_2_17`/`_2_28`/`_2_34`, so pinning any single platform
+  tag makes the resolve fail outright (`ResolutionImpossible`). Tags are inherited from
+  the build host instead, which means **the archive is architecture-specific to the
+  build host** (x86_64 in practice).
+- **`install.sh` installs the c2sync wheel by path with `--find-links` pointing at the
+  wheelhouse**, letting pip resolve the dependencies itself and pick tags matching the
+  target venv. It must *not* pass the dependency wheels by filename — with a
+  multi-version wheelhouse that forces pip to install wheels built for the wrong Python
+  minor.
+
+Two packaging traps that were live bugs here and are easy to reintroduce:
+
+- **`pyproject.toml` pins `[tool.setuptools.packages.find]` with `namespaces = false`.**
+  Without it, setuptools auto-discovery treats `c2sync/tests` (no `__init__.py`) as a
+  namespace package and ships the whole test suite inside the wheel.
+- **`pip wheel .` runs with `--no-cache-dir`.** pip caches locally-built wheels, so
+  without it a source change with no version bump silently ships a stale c2sync wheel.
+  The dependency downloads deliberately still use the cache.
+
+`build.sh` resolves the **test runner separately from the build interpreter** (`PYTEST`
+vs `PYTHON`): the interpreter that vendors wheels needs pip, the one that runs tests
+needs pytest plus the runtime deps, and those are frequently not the same (a uv-created
+`.venv` has no working pip). The `.venv` fallback uses `python -m pytest`, not the bare
+`pytest` executable — only the `-m` form puts the repo root on `sys.path`, which is what
+lets `from c2sync import ...` resolve without an install.
+
+`install.sh` is **per-user and never calls sudo**: venv in
+`${XDG_DATA_HOME:-~/.local/share}/c2sync/venv`, symlink at `~/.local/bin/c2sync`. When a
+prerequisite (Python 3.11+, venv support, `git`) is missing it prints the right command
+for the detected distro and exits rather than running a package manager itself. It
+verifies `SHA256SUMS` first, installs straight from the archive's `wheels/` (no copy
+under the install dir — that was 14MB of duplication for nothing), and warns if
+`~/.local/bin` isn't on `PATH`. Alpha's version mixed a `$HOME` venv with a
+`/usr/local/bin` launcher, which produced a system-wide command hardcoded to one user's
+home; the per-user layout is the fix for that.
+
+`uninstall.sh` reads the launcher's symlink target **before** deleting the install
+directory (`readlink -f` fails on the resulting dangling link) and removes the launcher
+only if it points into `INSTALL_DIR`, so a `c2sync` installed some other way survives.
+Project directories are never touched.
+
+`Dockerfile.test` (driven by `build.sh --test-install`, not used at runtime) installs
+the built archive as a non-root user, once per supported Python version. It checks both
+that the command runs and that `c2sync.main`/`connector`/`differ`/`git_ops` import — a
+missing transitive wheel only surfaces at import time. Note there is no real `--help`
+flag: `c2sync --help` falls through to the unknown-command branch, which logs an error
+and prints `USAGE` with exit 0, so the smoke test invokes bare `c2sync` instead.
+
 ## Known constraints / simplifications
 
 - Cisco IOS only; `device_type='cisco_ios'` is hardcoded in `connector.py`, and
@@ -311,6 +387,11 @@ but broken config is very likely a real mistake worth surfacing.
   correction.
 - No file locking on `state.json`/`staging.txt` — fine for one interactive CLI
   invocation at a time, not safe for concurrent access.
+- The release archive is Linux-only and tied to the build host's architecture (see
+  Build and distribution above). Distro packages (`.deb`/`.rpm`) and PyPI are possible
+  later, deliberately not now.
+- No `--help`/`-h` flag on the CLI; bare `c2sync` prints `USAGE`, and any unrecognized
+  command prints it too after logging an error.
 
 ## Roadmap and active design decisions
 

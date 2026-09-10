@@ -1,0 +1,27 @@
+# Verifies that a built archive installs cleanly on a machine that has nothing
+# but python3 and git. Driven by build.sh --test-install, once per supported
+# Python version; not used at runtime.
+ARG PYTHON_VERSION=3.11
+FROM python:${PYTHON_VERSION}-slim
+
+ARG DIST_NAME
+
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+# A non-root user, since install.sh is a per-user installer.
+RUN useradd -m tester
+USER tester
+WORKDIR /home/tester
+
+COPY --chown=tester:tester dist/${DIST_NAME}.tar.gz /home/tester/
+
+RUN tar -xzf ${DIST_NAME}.tar.gz \
+    && ./${DIST_NAME}/install.sh
+
+ENV PATH="/home/tester/.local/bin:${PATH}"
+
+# Smoke-test the installed command, and confirm the package actually imports
+# (a missing transitive wheel only shows up at import time, not at --help).
+RUN c2sync \
+    && ~/.local/share/c2sync/venv/bin/python -c "import c2sync.main, c2sync.connector, c2sync.differ, c2sync.git_ops"
