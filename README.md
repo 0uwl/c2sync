@@ -132,13 +132,82 @@ The second one matters because `build.sh` names the artifact from `pyproject.tom
 knows nothing about the tag, so without the check, releasing `v0.2.0` while
 `pyproject.toml` still said `0.1.0` would quietly attach `c2sync-0.1.0-*` to it.
 
-**To cut a release:** bump `version` in `pyproject.toml` on `main` first, then create a
-GitHub release whose tag matches.
-
 The runner is pinned rather than `ubuntu-latest` on purpose: manylinux wheel selection
 depends on the build host's glibc, so the runner image sets the glibc floor of every
 published archive. Pinning keeps that a deliberate change instead of one GitHub makes
 for you.
+
+## Cutting a release
+
+### 1. Bump the version on `main`
+
+The one step the pipeline cannot do for you, and the reason the version guard exists.
+
+```bash
+git checkout main && git pull
+git checkout -b release-0.2.0
+# edit pyproject.toml: version = "0.2.0"
+git commit -am "Bump version to 0.2.0"
+gh pr create --base main
+```
+
+CI runs on the PR (tests on 3.11/3.12/3.13, shellcheck, build + install-test). The
+archive is uploaded as a workflow artifact if you want to install it by hand before
+merging. Merge once it is green.
+
+### 2. Create the release from `main`
+
+```bash
+gh release create v0.2.0 --target main --title "v0.2.0" --generate-notes
+```
+
+`--target main` is what puts the new tag on `main`. The `v` prefix is optional — the
+guard strips a leading `v`, so `v0.2.0` and `0.2.0` both match `version = "0.2.0"`.
+
+A **draft** release triggers nothing; publishing it does, so notes can be staged first.
+Prereleases do trigger, deliberately.
+
+### 3. What runs
+
+```
+verify the tagged commit is an ancestor of main
+verify the tag matches pyproject.toml's version
+pip install -e ".[dev]"
+build.sh --test-install      # tests, vendor wheels x3, install-test x3
+sha256sum -> SHA256SUMS.txt
+gh release upload --clobber
+```
+
+Expect several minutes; three dependency downloads and three container builds dominate.
+
+### 4. Verify
+
+```bash
+gh release view v0.2.0
+# assets: c2sync-0.2.0-linux-x86_64.tar.gz, SHA256SUMS.txt
+```
+
+### When a guard fails
+
+The guards run *after* GitHub has published the release — a workflow cannot run before
+the event that triggers it. A failed guard therefore leaves a real, visible release with
+no archive attached.
+
+Fixing `main` and re-running the job does **not** help: the guard reads
+`pyproject.toml` from the *tagged commit*, so a tag pointing at the old commit keeps
+failing no matter what lands on `main` afterwards. Start over instead:
+
+```bash
+gh release delete v0.2.0 --cleanup-tag --yes
+# bump pyproject.toml on main properly, then create the release again
+```
+
+Re-running the workflow on a release that already has assets is safe — `gh release
+upload --clobber` replaces them rather than failing.
+
+If that after-the-fact failure window is unwelcome, the alternative is triggering on tag
+push (`on: push: tags: ['v*']`) and having the workflow call `gh release create` itself
+once the guards pass, so a bad tag never produces a visible release.
 
 ## Usage
 ### CLI Commands
