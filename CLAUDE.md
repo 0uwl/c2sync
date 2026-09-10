@@ -6,10 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A CLI tool that acts as a middleman between a Cisco IOS device (over console/serial or
 SSH) and a local git repository: pull the running-config to a local text file, edit it
-in a normal text editor, and push the diff back as CLI commands. Cisco IOS only is a
-**deliberate** starting scope (see Roadmap below), not an oversight — other vendors are
-a documented possible future direction (see `README.md`'s "Potential Future Features"),
-not current work.
+in a normal text editor, and push the diff back as CLI commands. Cisco IOS only, one
+device per project, is a **deliberate** starting scope (see Roadmap below), not an
+oversight — both other vendors and multi-device fleets are documented future directions
+(see `README.md`'s "Potential Future Features" and Out of current scope below), just not
+current work.
 
 There is no lint/format tooling configured in this repo (no ruff/black/flake8 config)
 — don't invent one.
@@ -60,8 +61,8 @@ files, not a package import.
 
 `c2sync init SERIAL_DEVICE [BAUDRATE]` (serial) or `c2sync init --ssh HOST [PORT]`
 (SSH) creates `./.c2sync/` holding the entire state for **one device** — there is
-currently no multi-device registry, which is an explicit non-goal rather than a gap
-(see Explicit non-goals below):
+currently no multi-device registry — a wanted future direction that is simply not built
+yet, not a rejected one (see Out of current scope below):
 
 - `device.config` (`EDIT_FILE`) — what the user edits in their text editor. Tracked in
   a real git repo (`git init` inside `PROJECT_DIR` at `init` time) — the baseline is no
@@ -497,21 +498,26 @@ Priority order, user-approved. All three have landed:
    `main.py` needed zero changes, confirming they really were transport-agnostic already
    (they operate on `Project` and CLI text, never on `DeviceInterface` internals).
 
-### Explicit non-goals
+### Out of current scope
 
-Decisions to *not* build something, recorded so they don't get re-litigated or
-half-implemented as a side effect of other work:
+Wanted, but not built and not currently in progress. **None of these are closed doors**
+— they are scoping decisions about sequencing, not rejections. The rule is only that
+each should be built deliberately, as its own piece of work, rather than half-emerging
+as a side effect of an unrelated change. `README.md`'s "Potential Future Features" is
+the user-facing write-up of what each would involve.
 
-- **Multi-device registry.** One project directory is one device. Earlier drafts of
-  `README.md` described a registry; that was documentation drift, not a plan. Don't
-  build it until it is deliberately prioritized — either build it properly or leave the
-  docs matching the code, but never half-do it while working on something else.
-- **Multi-vendor support.** Cisco IOS only, by design (see Known constraints above and
-  `README.md`'s "Potential Future Features").
-- **Dry-run against a simulator.** A real safety gap — nothing catches a command that is
-  syntactically valid but operationally destructive, such as shutting the interface the
-  session rides on — but deliberately out of scope. `c2sync revert` is the recovery path
-  instead of prevention.
+- **Multi-device support.** One project directory is one device today. A fleet registry
+  was the project's original goal and remains a wanted direction; the current
+  single-device model is the revamp's starting scope, not a verdict on the idea. The
+  main open design question is one repo for the fleet versus one repo per device — see
+  `README.md` for the trade-off.
+- **Multi-vendor support.** Cisco IOS only today, and a documented future direction
+  (see Known constraints above, and `README.md` for the per-vendor analysis: NX-OS is
+  the realistic near-term target, JunOS a much bigger lift).
+- **Dry-run against a simulator.** A real safety gap rather than a feature idea:
+  nothing catches a command that is syntactically valid but operationally destructive,
+  such as shutting the interface the session rides on. `c2sync revert` is today's
+  recovery path, which is mitigation after the fact rather than prevention.
 
 ## Docs drift to be aware of
 

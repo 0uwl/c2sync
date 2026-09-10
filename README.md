@@ -12,7 +12,7 @@ The tool lets you:
 * Push changes back to the device over serial or SSH, verified against the device's own response before anything is considered synced
 * Save the running configuration to the startup configuration
 
-Cisco IOS only, one device per project — a deliberate starting scope, not an oversight. Multi-vendor support is a possible future direction, not current scope (see Potential Future Features below).
+Cisco IOS only, one device per project — a deliberate starting scope, not an oversight. Both multi-device and multi-vendor support are wanted future directions rather than rejected ones; they are just not current scope (see Potential Future Features below).
 
 ## Core Design Principles
 
@@ -380,6 +380,35 @@ Every key is optional and already has a working default without this file. Passw
 ## Potential Future Features
 
 Ideas that have come up but aren't built or scheduled — see `CLAUDE.md`'s Roadmap for what's actually in progress.
+
+### Multi-device support
+
+The original goal for the project, and still a wanted direction — one C2Sync project
+currently tracks exactly one device, which is the starting scope of the rewrite rather
+than a decision against fleets.
+
+Most of the groundwork is already shaped for it. `Project` (`c2sync/__init__.py`)
+already holds every per-device path as a field rather than assuming a fixed layout, and
+`git_ops` already addresses files by a path relative to the repo root
+(`Project.edit_file_relpath`), so per-device subdirectories would not require rethinking
+the git layer. What would need designing:
+
+* **One repo for the fleet, or one repo per device.** A single repo (`devices/<name>/
+  device.config`) gives you one `git log` across the fleet and lets a change spanning
+  several devices land as one reviewable commit — closest to the original intent. Per-
+  device repos keep `revert` and `discard` semantics exactly as they are today. The
+  single-repo option looks like the better fit but makes `revert`'s "restore this device
+  to commit X" need a per-device path filter rather than a whole-tree checkout.
+* **Per-device state.** `state.json`'s `host_dirty`/`device_dirty` pair is per-project
+  today and would become per-device, as would `staging.txt`.
+* **Device selection and bulk operations.** Commands would need a device selector, and
+  `status` across a fleet is genuinely useful. `sync` across many devices is the hard
+  part: partial failure (device 3 of 8 rejects a command) needs a defined outcome, and
+  the existing single-device answer — abort the batch, recover with `c2sync revert` —
+  does not obviously generalise to a fleet.
+* **Credentials.** `C2SYNC_USERNAME`/`C2SYNC_PASSWORD` assume one device. A fleet needs
+  either shared credentials or a per-device lookup, without c2sync starting to store
+  secrets itself (see Credentials above).
 
 ### Multi-vendor support
 
