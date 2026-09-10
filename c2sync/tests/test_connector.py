@@ -22,7 +22,7 @@ def _make_interface(mock_conn: MagicMock, project: Project = PROJECT) -> DeviceI
 # ------------------------------------------------------------------
 
 def test_serial_project_passes_serial_settings_to_connecthandler():
-    serial_project = Project(TRANSPORT='serial', SERIAL_DEVICE='/dev/ttyUSB0', BAUDRATE=115200)
+    serial_project = Project(NAME='test', TRANSPORT='serial', SERIAL_DEVICE='/dev/ttyUSB0', BAUDRATE=115200)
 
     with patch('c2sync.connector.ConnectHandler') as mock_handler:
         DeviceInterface(serial_project, username='admin', password='pw')
@@ -37,7 +37,7 @@ def test_serial_project_passes_serial_settings_to_connecthandler():
 
 
 def test_ssh_project_passes_host_and_port_to_connecthandler():
-    ssh_project = Project(TRANSPORT='ssh', HOST='10.0.0.1', SSH_PORT=2222)
+    ssh_project = Project(NAME='test', TRANSPORT='ssh', HOST='10.0.0.1', SSH_PORT=2222)
 
     with patch('c2sync.connector.ConnectHandler') as mock_handler:
         DeviceInterface(ssh_project, username='admin', password='pw')
@@ -56,7 +56,7 @@ def test_ssh_project_verifies_host_keys_instead_of_trusting_any():
     we override this to the same known_hosts-verifying model a plain `ssh`
     client uses.
     """
-    ssh_project = Project(TRANSPORT='ssh', HOST='10.0.0.1')
+    ssh_project = Project(NAME='test', TRANSPORT='ssh', HOST='10.0.0.1')
 
     with patch('c2sync.connector.ConnectHandler') as mock_handler:
         DeviceInterface(ssh_project, username='admin', password='pw')
@@ -81,7 +81,7 @@ def test_unknown_host_key_not_prompted_by_default():
     prompt_for_unknown_hosts defaults to False - an unknown host key must
     fail closed (today's behavior), never silently trigger a prompt.
     """
-    ssh_project = Project(TRANSPORT='ssh', HOST='10.0.0.1')
+    ssh_project = Project(NAME='test', TRANSPORT='ssh', HOST='10.0.0.1')
 
     with patch('c2sync.connector.ConnectHandler', side_effect=UNKNOWN_HOST_ERROR), \
          patch('c2sync.connector._trust_new_host_key') as mock_trust:
@@ -92,7 +92,7 @@ def test_unknown_host_key_not_prompted_by_default():
 
 
 def test_unknown_host_key_prompts_and_retries_when_enabled():
-    ssh_project = Project(TRANSPORT='ssh', HOST='10.0.0.1')
+    ssh_project = Project(NAME='test', TRANSPORT='ssh', HOST='10.0.0.1')
     mock_conn = MagicMock()
 
     with patch('c2sync.connector.ConnectHandler', side_effect=[UNKNOWN_HOST_ERROR, mock_conn]) as mock_handler, \
@@ -110,7 +110,7 @@ def test_unrelated_connection_failure_does_not_trigger_the_prompt():
     ever trigger the trust flow - a different failure (bad password, TCP
     timeout, etc.) must not be misread as an unknown-host-key situation.
     """
-    ssh_project = Project(TRANSPORT='ssh', HOST='10.0.0.1')
+    ssh_project = Project(NAME='test', TRANSPORT='ssh', HOST='10.0.0.1')
     other_error = NetmikoTimeoutException('TCP connection to device failed.')
 
     with patch('c2sync.connector.ConnectHandler', side_effect=other_error), \
@@ -313,7 +313,7 @@ def test_serial_project_reaches_netmikos_real_serial_driver():
     class fails here (ValueError: "Either ip or host must be set") instead
     of only on real hardware.
     """
-    serial_project = Project(TRANSPORT='serial', SERIAL_DEVICE='/dev/ttyUSB0', BAUDRATE=115200)
+    serial_project = Project(NAME='test', TRANSPORT='serial', SERIAL_DEVICE='/dev/ttyUSB0', BAUDRATE=115200)
 
     # check_serial_port validates the path against the *test host's* real
     # comports, which has nothing to do with what we're asserting here.

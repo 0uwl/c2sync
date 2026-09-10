@@ -12,3 +12,7 @@ class ConfigSaveError(C2SyncError):
 
 class HostKeyRejectedError(C2SyncError):
     """Raised when an unknown SSH host key couldn't be verified/trusted (declined, or the check itself failed)."""
+
+
+class ProjectExistsError(C2SyncError):
+    """Raised when `init` targets a directory that already holds a c2sync project."""

@@ -10,7 +10,7 @@ from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutExc
 from c2sync import Project, get_project, git_ops, init_project, user_config
 from c2sync.connector import DeviceInterface
 from c2sync.differ import Differ
-from c2sync.exceptions import ConfigApplyError, ConfigSaveError, HostKeyRejectedError
+from c2sync.exceptions import ConfigApplyError, ConfigSaveError, HostKeyRejectedError, ProjectExistsError
 from c2sync.state_engine import StateEngine
 
 LOGGER = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ Usage:
 c2sync COMMAND [ARGS]
 
 Commands:
-    init      Start a project for one device in the current directory
+    init      Start a project for one device
     pull      Fetch the device's running config and make it the new baseline
     status    Show unpushed local edits and unsaved device changes
     push      Preview the staged commands and push them to the device
@@ -42,21 +42,37 @@ HELP_FLAGS = ('-h', '--help')
 
 COMMAND_HELP = {
     'init': """
-Usage: c2sync init SERIAL_DEVICE [BAUDRATE]
-       c2sync init --ssh HOST [PORT]
+Usage: c2sync init NAME SERIAL_DEVICE [BAUDRATE] [--dir PATH]
+       c2sync init NAME --ssh HOST [PORT] [--dir PATH]
 
-Start a C2Sync project for one device in the current directory.
+Start a C2Sync project for one device.
 
-Creates ./.c2sync/, initializes a git repository there, and makes the first
-commit (an empty device.config). Run `c2sync pull` next to onboard a device
-that already has a configuration.
+Creates ./NAME/ (or PATH, if --dir is given) holding device.config - the
+file you edit - plus a real git repository (initialized there, with the
+first commit being an empty device.config). Everything c2sync itself needs
+but you never do (staging.txt, state.json, c2sync.config) lives out of the
+way in a NAME/.c2sync/ subfolder, git-ignored entirely. `cd` into the
+project directory before running any other command - they all expect cwd to
+already be inside it, the same way `git status` expects to be run from
+inside the repository. Run `c2sync pull` next to onboard a device that
+already has a configuration.
 
 Arguments:
+  NAME           Project name - also the default directory (./NAME), unless
+                  --dir overrides it. Must not contain '/'.
   SERIAL_DEVICE  Serial port to use, e.g. /dev/ttyUSB0
   BAUDRATE       Serial baud rate (default: 9600, or `baudrate` from the
                  global config file)
   HOST           Hostname or address to reach over SSH
   PORT           SSH port (default: 22, or `ssh_port` from the global config)
+
+Options:
+  --dir PATH  Create the project at PATH instead of ./NAME. NAME is still
+              required - it's the project's identifier either way, not just
+              a directory name.
+
+Refuses to run if the target directory already holds a c2sync project,
+rather than overwriting its device.config/c2sync.config.
 
 SSH host keys are verified against ~/.ssh/known_hosts
 """,
@@ -236,32 +252,72 @@ def main():
             sys.exit(1)
 
 
+_INIT_USAGE = (
+    'Usage: c2sync init NAME SERIAL_DEVICE [BAUDRATE] [--dir PATH]\n'
+    '       c2sync init NAME --ssh HOST [PORT] [--dir PATH]'
+)
+
+
 def init(arguments: list):
     LOGGER.debug(f'Given arguments: {arguments}')
 
-    if not arguments:
-        print('Usage: c2sync init SERIAL_DEVICE [BAUDRATE]')
-        print('       c2sync init --ssh HOST [PORT]')
+    # --dir PATH can land anywhere after NAME, so pull it out first rather
+    # than accounting for it shifting the positional arguments that follow.
+    positional = list(arguments)
+    project_dir_override = None
+    if '--dir' in positional:
+        idx = positional.index('--dir')
+        try:
+            project_dir_override = positional[idx + 1]
+        except IndexError:
+            print(f'{_INIT_USAGE}\n\n--dir requires a path')
+            sys.exit(1)
+        del positional[idx:idx + 2]
+
+    if not positional:
+        print(_INIT_USAGE)
+        sys.exit(1)
+
+    name = positional[0]
+    # A NAME containing a path separator would otherwise silently nest
+    # directories (or, with '..', escape the intended location) when it
+    # doubles as the default directory name below.
+    if os.sep in name or name in ('.', '..'):
+        print(f"Invalid project name {name!r}: must not contain {os.sep!r} or be '.'/'..'")
+        sys.exit(1)
+
+    rest = positional[1:]
+    if not rest:
+        print(_INIT_USAGE)
         sys.exit(1)
 
     config = user_config.load()
 
-    if arguments[0] == '--ssh':
-        if len(arguments) < 2:
-            print('Usage: c2sync init --ssh HOST [PORT]')
+    if rest[0] == '--ssh':
+        if len(rest) < 2:
+            print(_INIT_USAGE)
             sys.exit(1)
-        port = int(arguments[2]) if len(arguments) > 2 else config.get('ssh_port', 22)
-        project_kwargs = {'TRANSPORT': 'ssh', 'HOST': arguments[1], 'SSH_PORT': port}
+        port = int(rest[2]) if len(rest) > 2 else config.get('ssh_port', 22)
+        project_kwargs = {'TRANSPORT': 'ssh', 'HOST': rest[1], 'SSH_PORT': port}
     else:
-        baudrate = int(arguments[1]) if len(arguments) > 1 else config.get('baudrate', 9600)
-        project_kwargs = {'TRANSPORT': 'serial', 'SERIAL_DEVICE': arguments[0], 'BAUDRATE': baudrate}
+        baudrate = int(rest[1]) if len(rest) > 1 else config.get('baudrate', 9600)
+        project_kwargs = {'TRANSPORT': 'serial', 'SERIAL_DEVICE': rest[0], 'BAUDRATE': baudrate}
 
     if 'timeout' in config:
         project_kwargs['TIMEOUT'] = config['timeout']
     if 'prompt_regex' in config:
         project_kwargs['PROMPT_REGEX'] = config['prompt_regex']
 
-    init_project(Project(**project_kwargs))
+    project_dir = project_dir_override or os.path.join('.', name)
+
+    try:
+        init_project(Project.at(project_dir, NAME=name, **project_kwargs))
+    except ProjectExistsError as e:
+        print(str(e))
+        sys.exit(1)
+
+    if project_dir != '.':
+        print(f'Run `cd {project_dir}` to enter the project.')
 
 
 def pull(arguments: list):
@@ -728,7 +784,8 @@ def _rollback_after_failed_push(
 def _require_project() -> Project:
     project = get_project()
     if project is None:
-        print('No C2Sync project found in this directory. Run `c2sync init SERIAL_DEVICE` first.')
+        print('No C2Sync project found in this directory. Run `c2sync init NAME SERIAL_DEVICE` to '
+              'start one, or `cd` into an existing project directory first.')
         sys.exit(1)
     return project
 

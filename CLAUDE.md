@@ -34,8 +34,8 @@ pytest c2sync/tests/test_differ.py::test_refresh_staging_stages_additions_with_c
 
 # Run the CLI locally (after install; requires a real or mocked device connection for
 # anything beyond `init`/`status`/`discard`)
-c2sync init /dev/ttyUSB0 [BAUDRATE]     # serial transport
-c2sync init --ssh HOST [PORT]           # SSH transport
+c2sync init NAME SERIAL_DEVICE [BAUDRATE] [--dir PATH]   # serial transport
+c2sync init NAME --ssh HOST [PORT] [--dir PATH]          # SSH transport
 c2sync pull [--force|-f]
 c2sync status
 c2sync push [-y] [--force|-f] [--rollback-on-error]
@@ -63,28 +63,63 @@ files, not a package import.
 
 ### Project directory model
 
-`c2sync init SERIAL_DEVICE [BAUDRATE]` (serial) or `c2sync init --ssh HOST [PORT]`
-(SSH) creates `./.c2sync/` holding the entire state for **one device** — there is
-currently no multi-device registry — a wanted future direction that is simply not built
-yet, not a rejected one (see Out of current scope below):
+`c2sync init NAME SERIAL_DEVICE [BAUDRATE] [--dir PATH]` (serial) or `c2sync init NAME
+--ssh HOST [PORT] [--dir PATH]` (SSH) creates a project directory for **one device** —
+there is currently no multi-device registry — a wanted future direction that is simply
+not built yet, not a rejected one (see Out of current scope below). `NAME` is mandatory:
+it's the default directory (`./NAME`, overridable with `--dir PATH`) and the project's
+human-readable identity for anything that isn't the device itself (see `Project.target`
+vs. `Project.NAME` below).
 
-- `device.config` (`EDIT_FILE`) — what the user edits in their text editor. Tracked in
-  a real git repo (`git init` inside `PROJECT_DIR` at `init` time) — the baseline is no
-  longer a separate file, it's `device.config` as of git `HEAD` (see On-demand change
-  detection below).
-- `staging.txt` (`STAGING_FILE`) — the recomputed CLI commands to push, fully
-  overwritten (not appended) on every check.
-- `state.json` (`STATE_FILE`) — `{host_dirty, device_dirty}`, see State tracking below.
-- `c2sync.config` (`CONFIG_FILE`) — the serialized `Project` dataclass (transport,
-  serial device path/baudrate or SSH host/port, timeout, all the above paths).
+**Only `.c2sync/` is hidden.** Earlier this put everything - including `device.config`,
+the one file a human actually opens - inside a single hidden folder, which inverted how
+git itself is organized: `.git/` is hidden VCS metadata, but the tracked files live
+directly in the working directory. The project directory now mirrors that split:
 
-`staging.txt`, `state.json`, and `c2sync.config` are local operational scratch, not
-device config to review — `init` writes a `.gitignore` in `PROJECT_DIR` excluding all
-three, so only `device.config` is ever committed.
+```
+myrouter/                 <- what you `cd` into; PROJECT_DIR is '.' from in here
+├── device.config         <- EDIT_FILE, what you edit, tracked in git
+├── .gitignore             <- excludes .c2sync/ - the only entry it needs
+├── .git/                  <- real git repo, git_ops.init() ran here
+└── .c2sync/               <- the only hidden part: pure operational scratch
+    ├── c2sync.config      <- CONFIG_FILE, the serialized Project (see below)
+    ├── staging.txt        <- STAGING_FILE, recomputed CLI commands, fully overwritten each check
+    └── state.json         <- STATE_FILE, {host_dirty, device_dirty}, see State tracking below
+```
 
-All paths live on the `Project` dataclass in `c2sync/__init__.py`, which also has
-`init_project()`/`get_project()`. `get_project()` reads `./.c2sync/c2sync.config`
-relative to cwd — commands must be run from the project directory.
+`device.config` is tracked in git; the baseline is `device.config` at git `HEAD`, not a
+separate file (see On-demand change detection below). The three `.c2sync/` files are
+never committed - `.gitignore`'s one line (`.c2sync/`) excludes the whole subfolder,
+rather than naming each file, so nothing new added there later needs a matching entry.
+
+**Every command except `init` expects cwd to already be inside the project directory** -
+the same way `git status` expects to be run from inside the repository, not handed a
+path to one. `get_project()` looks for `./.c2sync` relative to cwd; there's no walking
+up the tree the way git finds `.git` from a subdirectory, so the project's own top level
+is the only place commands work from today.
+
+**`Project.at(project_dir, **kwargs)`** (`c2sync/__init__.py`) is what actually builds a
+`Project` for a location other than `.`. The dataclass's own field defaults for
+`CONFIG_FILE`/`EDIT_FILE`/`STAGING_FILE`/`STATE_FILE` are plain `'.'`-relative strings
+evaluated once at class definition time - correct only for the implicit "already inside
+the project" case every command but `init` runs in. `init` (creating `./NAME` or
+`--dir PATH`) and any test needing a project somewhere else go through `.at()` instead
+of the plain constructor.
+
+**`Project.to_dict()` deliberately omits `PROJECT_DIR` and the four paths derived from
+it.** A path is only ever valid relative to wherever `init` was physically run from, but
+every later command loads this config expecting cwd to already be inside the project -
+so the fixed `.`-relative dataclass defaults are what should apply on load, not
+whatever path happened to resolve at creation time. This is also what makes a renamed or
+moved project directory keep working with no migration: nothing in `c2sync.config`
+encodes where the directory used to be, or is.
+
+`init_project()` refuses to run (raises `ProjectExistsError`, caught in `main.py` and
+turned into a clean exit) if `PROJECT_DIR/.c2sync/` already exists, rather than
+silently overwriting an existing project's `device.config`/`c2sync.config`. This is
+stricter than `git init`'s own idempotent-rerun behavior on purpose: `git init` in an
+existing repo is harmless, but c2sync's `init` also writes `device.config`, so the same
+idempotence would mean silent data loss on a second run.
 
 ### Module map
 
@@ -96,7 +131,7 @@ relative to cwd — commands must be run from the project directory.
 | `c2sync/git_ops.py` | Thin `git` subprocess wrapper — `init`/`commit`/`commit_content`/`commit_empty`/`show_at`/`show_at_head`/`resolve_rev` |
 | `c2sync/user_config.py` | Reads the optional global TOML preferences file — `load()`/`config_path()` |
 | `c2sync/state_engine.py` | `StateEngine` — `host_dirty`/`device_dirty` tracking |
-| `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigSaveError`, `HostKeyRejectedError` |
+| `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigSaveError`, `HostKeyRejectedError`, `ProjectExistsError` |
 | `c2sync/main.py` | CLI entry point: `init` / `pull` / `status` / `push` / `save` / `discard` / `revert` |
 
 ### Diff → CLI command translation (`differ.py`)
@@ -351,10 +386,11 @@ commit (`git_ops.commit_empty()`) since there's no file content to stage for it.
 staging) so discarded edits can't get silently re-staged on the next check.
 
 `init` also runs `git init -b main` in `PROJECT_DIR` and makes the first commit
-(empty `device.config` + the `.gitignore`) — see Project directory model above.
-`c2sync` intentionally does not wrap `git log`/`diff`/`branch`/PR review; the same
-repo is a normal git repo the user can drive directly with `git` or push to
-GitHub/GitLab for review.
+(empty `device.config` + the `.gitignore`) — see Project directory model above for the
+directory layout, `NAME`/`--dir` resolution, and why re-running `init` on an existing
+project refuses rather than overwriting it. `c2sync` intentionally does not wrap
+`git log`/`diff`/`branch`/PR review; the same repo is a normal git repo the user can
+drive directly with `git` or push to GitHub/GitLab for review.
 
 `revert [COMMIT] [-y] [--force|-f]` is the manual recovery path for a bad push (e.g. a
 batch where command 3 of 8 got rejected after 1-2 already landed) — see Known
@@ -451,9 +487,9 @@ the path fresh on each call (not a module-level constant) specifically so tests 
 
 Recognized keys, all optional:
 - `username` — read by `_connect()` (see CLI surface above); never the password/secret.
-- `baudrate` — default for `c2sync init SERIAL_DEVICE [BAUDRATE]`'s optional argument;
-  an explicit CLI argument still wins.
-- `ssh_port` — same, but for `c2sync init --ssh HOST [PORT]`'s optional argument.
+- `baudrate` — default for `c2sync init NAME SERIAL_DEVICE [BAUDRATE]`'s optional
+  argument; an explicit CLI argument still wins.
+- `ssh_port` — same, but for `c2sync init NAME --ssh HOST [PORT]`'s optional argument.
 - `prompt_for_unknown_ssh_hosts` — **default `False`.** When `True`, an SSH host with no
   entry in `~/.ssh/known_hosts` gets an OpenSSH-style prompt (fingerprint shown, y/n)
   instead of failing closed; accepting adds it to `known_hosts` and retries the
@@ -627,8 +663,8 @@ Priority order, user-approved. All three have landed:
    `DeviceInterface` was already transport-independent. `Project` gained `TRANSPORT`,
    `HOST`, `SSH_PORT` (`SERIAL_DEVICE`/`BAUDRATE` now only apply when `TRANSPORT ==
    'serial'`) and a `.target` property so callers don't branch on transport themselves.
-   `c2sync init --ssh HOST [PORT]` is the new CLI entry point alongside the existing
-   `c2sync init SERIAL_DEVICE [BAUDRATE]`. `differ.py`/`state_engine.py`/the rest of
+   `c2sync init NAME --ssh HOST [PORT]` is the new CLI entry point alongside the existing
+   `c2sync init NAME SERIAL_DEVICE [BAUDRATE]`. `differ.py`/`state_engine.py`/the rest of
    `main.py` needed zero changes, confirming they really were transport-agnostic already
    (they operate on `Project` and CLI text, never on `DeviceInterface` internals).
 

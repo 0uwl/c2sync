@@ -16,7 +16,11 @@ def test_init_project():
     assert os.path.isfile(PROJECT.STATE_FILE)
 
 
-def test_get_project():
+def test_get_project(monkeypatch):
+    # get_project() looks for a project relative to cwd, same as every
+    # other command - unlike the old layout, PROJECT.PROJECT_DIR is no
+    # longer '.' itself, so finding it means cd'ing into it first.
+    monkeypatch.chdir(PROJECT.PROJECT_DIR)
     project = get_project()
 
     assert project

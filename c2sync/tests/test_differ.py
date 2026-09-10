@@ -119,11 +119,13 @@ def test_diff_lines_returns_commands_without_touching_staging_file(differ):
 def test_refresh_staging_from_files_reads_baseline_and_edit_file(tmp_path):
     from c2sync import Project, git_ops
 
-    project_dir = tmp_path / '.c2sync'
+    project_dir = tmp_path / 'myproject'
     project_dir.mkdir()
 
+    project = Project.at(str(project_dir), NAME='myproject', SERIAL_DEVICE='NOT USED')
     edit_file = project_dir / 'device.config'
-    staging_file = project_dir / 'staging.txt'
+    staging_file = project_dir / '.c2sync' / 'staging.txt'
+    staging_file.parent.mkdir()
 
     edit_file.write_text("interface Gi1/0/1\n")
     staging_file.write_text("")
@@ -132,13 +134,6 @@ def test_refresh_staging_from_files_reads_baseline_and_edit_file(tmp_path):
     git_ops.commit(str(project_dir), ['device.config'], 'baseline')
 
     edit_file.write_text("interface Gi1/0/1\n shutdown\n")
-
-    project = Project(
-        SERIAL_DEVICE='NOT USED',
-        PROJECT_DIR=str(project_dir),
-        EDIT_FILE=str(edit_file),
-        STAGING_FILE=str(staging_file),
-    )
 
     staged = Differ(project).refresh_staging_from_files()
 
