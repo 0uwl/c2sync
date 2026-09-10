@@ -1,5 +1,7 @@
 import logging
+import os
 import subprocess
+import tempfile
 
 from c2sync.exceptions import C2SyncError
 
@@ -10,10 +12,14 @@ class GitError(C2SyncError):
     """Raised when a git operation fails."""
 
 
-def _run(project_dir: str, *args: str) -> str:
+def _run(project_dir: str, *args: str, stdin: str = None, env: dict = None) -> str:
     result = subprocess.run(
         ['git', '-C', project_dir, *args],
-        capture_output=True, text=True,
+        capture_output=True, text=True, input=stdin,
+        # env replaces the environment wholesale rather than extending it,
+        # so callers passing one (commit_content's GIT_INDEX_FILE) would
+        # otherwise lose PATH/HOME and git's own config discovery with it.
+        env={**os.environ, **env} if env else None,
     )
     if result.returncode != 0:
         raise GitError(result.stderr.strip())
@@ -35,6 +41,47 @@ def commit(project_dir: str, paths: list[str], message: str) -> bool:
         return False
 
     _run(project_dir, 'commit', '-q', '-m', message)
+    return True
+
+
+def commit_content(project_dir: str, path: str, content: str, message: str) -> bool:
+    """
+    Commit `content` as `path` without touching the working tree or the
+    real index. Returns False without erroring if the resulting tree is
+    identical to HEAD's, mirroring commit()'s "nothing changed" contract.
+
+    This exists for advancing the baseline to a config the user is *not*
+    editing - specifically `sync`'s partial-push reconciliation, where
+    HEAD must move to what the device actually has while EDIT_FILE keeps
+    the user's unpushed edits. Doing that through `git add` would mean
+    overwriting EDIT_FILE, committing, then writing the user's content
+    back, leaving a window where a crash loses their work.
+
+    Uses plumbing against a throwaway index seeded from HEAD, so every
+    other tracked file is carried into the new commit unchanged and a
+    concurrent `git add` in the project dir can't be disturbed by it.
+    """
+    blob = _run(project_dir, 'hash-object', '-w', '--stdin', stdin=content).strip()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        index_env = {'GIT_INDEX_FILE': os.path.join(tmpdir, 'index')}
+        _run(project_dir, 'read-tree', 'HEAD', env=index_env)
+        _run(project_dir, 'update-index', '--add', '--cacheinfo', f'100644,{blob},{path}', env=index_env)
+        tree = _run(project_dir, 'write-tree', env=index_env).strip()
+
+    if tree == _run(project_dir, 'rev-parse', 'HEAD^{tree}').strip():
+        return False
+
+    head = _run(project_dir, 'rev-parse', 'HEAD').strip()
+    new_commit = _run(project_dir, 'commit-tree', tree, '-p', head, '-m', message).strip()
+    _run(project_dir, 'update-ref', '-m', message, 'HEAD', new_commit)
+
+    # Point the *real* index at the new HEAD for this path, worktree
+    # untouched. Without this the index still holds the pre-commit blob, so
+    # a plain `git status` in the project dir reports a staged change the
+    # user never made ("MM") - precisely the misleading state this whole
+    # reconciliation exists to remove.
+    _run(project_dir, 'reset', '-q', 'HEAD', '--', path)
     return True
 
 

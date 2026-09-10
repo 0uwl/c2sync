@@ -38,7 +38,7 @@ c2sync init /dev/ttyUSB0 [BAUDRATE]     # serial transport
 c2sync init --ssh HOST [PORT]           # SSH transport
 c2sync pull [--force|-f]
 c2sync status
-c2sync sync [-y]
+c2sync sync [-y] [--rollback-on-error]
 c2sync commit [-y]
 c2sync discard
 c2sync revert [COMMIT] [-y] [--force|-f]   # COMMIT defaults to HEAD
@@ -93,7 +93,7 @@ relative to cwd — commands must be run from the project directory.
 | `c2sync/__init__.py` | `Project` dataclass, `init_project`/`get_project` |
 | `c2sync/connector.py` | `DeviceInterface` — Netmiko `ConnectHandler` wrapper (serial or SSH) |
 | `c2sync/differ.py` | `Differ` — real config-tree diff (`ciscoconfparse2`) → CLI commands |
-| `c2sync/git_ops.py` | Thin `git` subprocess wrapper — `init`/`commit`/`commit_empty`/`show_at_head` |
+| `c2sync/git_ops.py` | Thin `git` subprocess wrapper — `init`/`commit`/`commit_content`/`commit_empty`/`show_at`/`show_at_head`/`resolve_rev` |
 | `c2sync/user_config.py` | Reads the optional global TOML preferences file — `load()`/`config_path()` |
 | `c2sync/state_engine.py` | `StateEngine` — `host_dirty`/`device_dirty` tracking |
 | `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigSaveError`, `HostKeyRejectedError` |
@@ -212,6 +212,50 @@ Two things this wrapper adds on top of raw Netmiko, transport-independent:
 commit the new baseline to git, mark `device_dirty` clean) after these confirmed
 returns — never optimistically.
 
+### Partial-push reconciliation (`sync`'s error path)
+
+`apply_config` aborts the batch on the first rejected command, but the commands
+*before* it are already running on the device. Previously `sync` caught
+`ConfigApplyError`, printed "nothing was applied" (which was simply false), and exited
+without touching state — so the baseline still described the pre-push device and
+`status` reported the landed commands as unsynced local edits. That is the bug this
+path exists to fix.
+
+**Always, unconditionally:** `_reconcile_after_failed_push()` re-reads the running
+config over the still-open session and commits it as the new baseline via
+`git_ops.commit_content()`, **deliberately leaving `EDIT_FILE` alone**. The user's
+unpushed edits are still what they want, so diffing them against the corrected baseline
+yields exactly the commands that did *not* land — which is what `status` then shows.
+Reading the device is also strictly more reliable than parsing Netmiko's exception to
+infer how many commands landed. `device_dirty` is set when anything landed (those
+commands are in running-config, not startup-config). Reconciliation only ever reads from
+the device and writes locally, which is what makes it safe to do automatically; if the
+re-read itself fails, it says so and tells the user to `pull --force` rather than
+leaving them with silently wrong state.
+
+**Opt-in, via `sync --rollback-on-error`:** `_rollback_after_failed_push()` diffs the
+live device against the baseline the sync *started* from (captured as `pre_sync_head`
+before the push, since reconciliation moves `HEAD`) and pushes the correction — the same
+thing `revert` does by hand. It previews and confirms unless `-y`.
+
+Undoing is **not** the default, and the reason is not implementation cost (`revert`
+already had the machinery; wiring it in was a few lines):
+
+- It sends *more* config to a device that just rejected some. The correction can itself
+  be rejected, leaving a third state nobody predicted.
+- A negation is not always a safe inverse — undoing an address or interface change can
+  cut the session doing the undoing. This is the same unmitigated hazard listed under
+  Out of current scope ("shutting the interface the session rides on"); making rollback
+  automatic would make that hazard fire *unprompted* rather than only when a human
+  chose it.
+- The partial state is usually the one worth keeping: commands 1-5 landed, command 6 had
+  a typo, and the normal fix is to correct the typo and push the remainder.
+
+`status` prints the unsaved-startup-config note alongside staged commands when
+`device_dirty` is also set. `state.label` only ever surfaces one flag (`host_dirty`
+wins), and both being set is the normal post-partial-push state, so it would otherwise
+be invisible.
+
 ### CLI surface (`main.py`)
 
 Actual commands: `init`, `pull`, `status`, `sync`, `commit`, `discard`, `revert`. `pull`
@@ -226,7 +270,8 @@ other prompt to skip, so (like `revert`, see below) the overwrite-approval flag 
 (recomputes staging, prints state + preview, never connects to the device — this is the
 `git status` analog). `sync` pushes, then re-fetches `show running-config brief`,
 writes it to `EDIT_FILE`, and makes a real git commit in `PROJECT_DIR` (`git_ops.
-commit()`) — advancing `HEAD` *is* advancing the baseline now. `commit` refuses to run
+commit()`) — advancing `HEAD` *is* advancing the baseline now. When the push is rejected
+partway it does *not* just bail: see Partial-push reconciliation above. `commit` refuses to run
 while `host_dirty` (would save unintended state to startup-config), saves
 running→startup only when `device_dirty`, and records that milestone as an empty git
 commit (`git_ops.commit_empty()`) since there's no file content to stage for it.
@@ -464,11 +509,11 @@ job does not need it, since it passes `--skip-tests`.
 - Cisco IOS only; `device_type` is hardcoded in `connector.py` to the `cisco_ios`
   family (`cisco_ios_serial` on the serial branch — see Device transport above), and
   `Diff(..., syntax='ios')` is hardcoded in `differ.py`.
-- No *automatic* rollback if command N of a multi-command batch is rejected after
-  N-1 already landed on the device — `apply_config` aborts the batch but doesn't
-  undo what already applied. `c2sync revert` (see CLI surface above) is the manual
-  recovery path: it diffs the live device against a past commit and pushes the
-  correction.
+- Rolling back a partial push (command N of a batch rejected after N-1 landed) is
+  **opt-in**, not automatic: `apply_config` aborts the batch, and `sync` always
+  reconciles local state to what actually landed but does not undo it. `sync
+  --rollback-on-error` and `c2sync revert` are the two recovery paths — see
+  Partial-push reconciliation below for why undoing is not the default.
 - No file locking on `state.json`/`staging.txt` — fine for one interactive CLI
   invocation at a time, not safe for concurrent access.
 - The release archive is Linux-only and tied to the build host's architecture (see

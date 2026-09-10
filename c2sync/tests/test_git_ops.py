@@ -72,3 +72,65 @@ def test_show_at_head_returns_none_before_first_commit(tmp_path):
     git_ops.init(project_dir)
 
     assert git_ops.show_at_head(project_dir, 'device.config') is None
+
+
+# ------------------------------------------------------------------
+# commit_content
+# ------------------------------------------------------------------
+
+def test_commit_content_advances_head_without_touching_the_working_tree(repo, tmp_path):
+    """
+    The whole point of commit_content: move the baseline to what the device
+    actually has while the file the user is editing keeps their unpushed
+    edits.
+    """
+    (tmp_path / 'device.config').write_text('my unpushed edits\n')
+
+    changed = git_ops.commit_content(repo, 'device.config', 'live from device\n', 'partial push')
+
+    assert changed is True
+    assert git_ops.show_at_head(repo, 'device.config') == 'live from device\n'
+    assert (tmp_path / 'device.config').read_text() == 'my unpushed edits\n'
+
+
+def test_commit_content_returns_false_when_content_matches_head(repo):
+    assert git_ops.commit_content(repo, 'device.config', 'interface Gi1/0/1\n', 'no-op') is False
+
+
+def test_commit_content_preserves_other_tracked_files(repo, tmp_path):
+    """
+    The temp index is seeded from HEAD, so files commit_content isn't
+    writing must survive into the new commit - losing .gitignore here would
+    start tracking staging.txt/state.json.
+    """
+    (tmp_path / '.gitignore').write_text('staging.txt\n')
+    git_ops.commit(repo, ['.gitignore'], 'add gitignore')
+
+    git_ops.commit_content(repo, 'device.config', 'live from device\n', 'partial push')
+
+    assert git_ops.show_at(repo, 'HEAD', '.gitignore') == 'staging.txt\n'
+
+
+def test_commit_content_leaves_no_staged_change_behind(repo, tmp_path):
+    """
+    If the real index kept the pre-commit blob, a plain `git status` in the
+    project dir would report a staged change the user never made.
+    """
+    (tmp_path / 'device.config').write_text('my unpushed edits\n')
+
+    git_ops.commit_content(repo, 'device.config', 'live from device\n', 'partial push')
+
+    status = git_ops._run(repo, 'status', '--porcelain')
+    assert status.strip() == 'M device.config'
+
+
+def test_commit_content_keeps_the_previous_commit_as_parent(repo):
+    """
+    Modeled on the rest of c2sync's git use: history is appended to, never
+    rewritten, so a bad push stays visible in `git log`.
+    """
+    before = git_ops.resolve_rev(repo, 'HEAD')
+
+    git_ops.commit_content(repo, 'device.config', 'live from device\n', 'partial push')
+
+    assert git_ops.resolve_rev(repo, 'HEAD~1') == before
