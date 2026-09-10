@@ -30,16 +30,28 @@ Commands:
     revert       Push the device's running config back to a past commit (HEAD by default)
                  [COMMIT] [-y] [--force|-f]  -y skips the push confirmation; --force/-f
                  is required to overwrite unsynced local edits
+    help         Show this message (also -h, --help)
 """
 
+# 'help' is only a command; -h/--help are also honoured as arguments to a
+# command, so `c2sync init --help` prints usage instead of starting a project
+# for a device literally named '--help'.
+HELP_COMMANDS = ('help', '-h', '--help')
+HELP_FLAGS = ('-h', '--help')
+
 def main():
-    try:
-        command = sys.argv[1]
-    except IndexError:
+    arguments = sys.argv[1:]
+
+    if not arguments:
         print(USAGE)
         return
 
-    command_arguments = sys.argv[2:]
+    command = arguments[0]
+    command_arguments = arguments[1:]
+
+    if command in HELP_COMMANDS or any(a in HELP_FLAGS for a in command_arguments):
+        print(USAGE)
+        return
 
     match command:
         case 'init':
@@ -58,7 +70,8 @@ def main():
             revert(command_arguments)
         case _:
             LOGGER.error(f'Unknown command {command}')
-            print(USAGE)
+            print(USAGE, file=sys.stderr)
+            sys.exit(1)
 
 
 def init(arguments: list):

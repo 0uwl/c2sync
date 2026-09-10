@@ -23,5 +23,5 @@ ENV PATH="/home/tester/.local/bin:${PATH}"
 
 # Smoke-test the installed command, and confirm the package actually imports
 # (a missing transitive wheel only shows up at import time, not at --help).
-RUN c2sync \
+RUN c2sync --help \
     && ~/.local/share/c2sync/venv/bin/python -c "import c2sync.main, c2sync.connector, c2sync.differ, c2sync.git_ops"

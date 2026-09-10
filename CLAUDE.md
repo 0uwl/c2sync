@@ -249,6 +249,15 @@ commit when the recovered content already matches `HEAD`, exactly like
 already rely on). `host_dirty`/`device_dirty` transition the same way a successful
 `sync` does.
 
+`main()` handles help before dispatching: `help`, `-h` and `--help` as the command all
+print `USAGE` to stdout and return 0, as does bare `c2sync`. `-h`/`--help` are also
+honoured *anywhere in a command's arguments*, so `c2sync init --help` prints usage
+rather than starting a project for a device literally named `--help` — `init` treats its
+first argument as a serial device path, so without this the flag would be taken as one.
+(`help` is deliberately only recognized as the command itself, so it stays usable as a
+`revert` commit-ish.) An unrecognized command logs an error, prints `USAGE` to **stderr**
+and exits **1**, so a script can tell a typo from a help request.
+
 `pull`, `sync`, `commit`, and `revert` all connect through `_connected()`, a
 `@contextmanager` wrapping `_connect()` in `try`/`finally` so `interface.disconnect()`
 always runs — including when a call inside the block raises (a rejected push, a
@@ -371,10 +380,8 @@ Project directories are never touched.
 
 `Dockerfile.test` (driven by `build.sh --test-install`, not used at runtime) installs
 the built archive as a non-root user, once per supported Python version. It checks both
-that the command runs and that `c2sync.main`/`connector`/`differ`/`git_ops` import — a
-missing transitive wheel only surfaces at import time. Note there is no real `--help`
-flag: `c2sync --help` falls through to the unknown-command branch, which logs an error
-and prints `USAGE` with exit 0, so the smoke test invokes bare `c2sync` instead.
+that `c2sync --help` runs and that `c2sync.main`/`connector`/`differ`/`git_ops` import
+— a missing transitive wheel only surfaces at import time, not at `--help`.
 
 ## Known constraints / simplifications
 
@@ -390,8 +397,8 @@ and prints `USAGE` with exit 0, so the smoke test invokes bare `c2sync` instead.
 - The release archive is Linux-only and tied to the build host's architecture (see
   Build and distribution above). Distro packages (`.deb`/`.rpm`) and PyPI are possible
   later, deliberately not now.
-- No `--help`/`-h` flag on the CLI; bare `c2sync` prints `USAGE`, and any unrecognized
-  command prints it too after logging an error.
+- No per-command help text; `-h`/`--help` anywhere on the line prints the same
+  top-level `USAGE` (see CLI surface above), it does not describe just that command.
 
 ## Roadmap and active design decisions
 

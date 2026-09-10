@@ -625,3 +625,52 @@ def test_revert_disconnects_even_if_fetching_live_config_raises(project):
             main_module.revert(['-y'])
 
     revert_conn.disconnect.assert_called_once()
+
+
+# ------------------------------------------------------------------
+# help / unknown commands
+# ------------------------------------------------------------------
+
+@pytest.mark.parametrize('argv', [
+    ['c2sync'],
+    ['c2sync', 'help'],
+    ['c2sync', '-h'],
+    ['c2sync', '--help'],
+])
+def test_help_prints_usage_to_stdout_and_exits_cleanly(argv, monkeypatch, capsys):
+    monkeypatch.setattr('sys.argv', argv)
+
+    main_module.main()
+
+    captured = capsys.readouterr()
+    assert 'Usage:' in captured.out
+    assert 'revert' in captured.out
+    assert captured.err == ''
+
+
+@pytest.mark.parametrize('command', ['init', 'pull', 'sync', 'commit', 'revert'])
+@pytest.mark.parametrize('flag', ['-h', '--help'])
+def test_help_flag_after_a_command_prints_usage_without_running_it(
+    command, flag, monkeypatch, capsys, tmp_path
+):
+    # Guards a real footgun: without this, `c2sync init --help` would start a
+    # project for a device literally named '--help'.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr('sys.argv', ['c2sync', command, flag])
+
+    main_module.main()
+
+    assert 'Usage:' in capsys.readouterr().out
+    assert not (tmp_path / '.c2sync').exists()
+
+
+def test_unknown_command_exits_nonzero_with_usage_on_stderr(monkeypatch, capsys):
+    monkeypatch.setattr('sys.argv', ['c2sync', 'bogus'])
+
+    with pytest.raises(SystemExit) as excinfo:
+        main_module.main()
+
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert 'Usage:' in captured.err
+    assert 'Usage:' not in captured.out

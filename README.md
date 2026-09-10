@@ -114,7 +114,12 @@ Commands:
   commit    [-y]                      Save the device's running config to its startup config
   discard                             Revert local edits back to the last confirmed sync
   revert    [COMMIT] [-y] [--force|-f]  Push the device back to a past commit (default: HEAD)
+  help                                Show this message (also -h, --help)
 ```
+
+`-h`/`--help` work anywhere on the line, so `c2sync init --help` shows usage rather than
+being read as a device path. Bare `c2sync` prints the same thing. An unrecognized
+command prints usage to stderr and exits 1.
 
 ## General workflow
 
