@@ -31,13 +31,143 @@ Commands:
                  [COMMIT] [-y] [--force|-f]  -y skips the push confirmation; --force/-f
                  is required to overwrite unsynced local edits
     help         Show this message (also -h, --help)
+
+Run `c2sync COMMAND --help` for detail on a single command.
 """
 
 # 'help' is only a command; -h/--help are also honoured as arguments to a
-# command, so `c2sync init --help` prints usage instead of starting a project
-# for a device literally named '--help'.
+# command, so `c2sync init --help` prints that command's help instead of
+# starting a project for a device literally named '--help'.
 HELP_COMMANDS = ('help', '-h', '--help')
 HELP_FLAGS = ('-h', '--help')
+
+COMMAND_HELP = {
+    'init': """
+Usage: c2sync init SERIAL_DEVICE [BAUDRATE]
+       c2sync init --ssh HOST [PORT]
+
+Start a C2Sync project for one device in the current directory.
+
+Creates ./.c2sync/, initializes a git repository there, and makes the first
+commit (an empty device.config). Run `c2sync pull` next to onboard a device
+that already has a configuration.
+
+Arguments:
+  SERIAL_DEVICE  Serial port to use, e.g. /dev/ttyUSB0
+  BAUDRATE       Serial baud rate (default: 9600, or `baudrate` from the
+                 global config file)
+  HOST           Hostname or address to reach over SSH
+  PORT           SSH port (default: 22, or `ssh_port` from the global config)
+
+SSH host keys are verified against ~/.ssh/known_hosts, the same as a plain
+ssh client, so trust the device's key there first if you have not already.
+""",
+
+    'pull': """
+Usage: c2sync pull [--force|-f]
+
+Fetch the device's running config and commit it as the new baseline.
+
+This is how an already-configured device gets onboarded, since `init` alone
+only creates an empty device.config. It also resyncs the baseline when the
+device was changed outside of C2Sync.
+
+Options:
+  --force, -f  Overwrite unsynced local edits. Without it, pull refuses to
+               run while you have local edits that would be lost.
+
+There is no -y here: pull has no other prompt to skip, so the overwrite
+approval is spelled --force rather than a generic "don't ask me anything".
+""",
+
+    'status': """
+Usage: c2sync status
+
+Show whether there are unsynced local edits or unsaved device changes.
+
+Recomputes the staged commands from device.config against the last confirmed
+sync (device.config at git HEAD), then prints the device state and a preview
+of anything staged. Read-only, and never connects to the device.
+""",
+
+    'sync': """
+Usage: c2sync sync [-y]
+
+Preview the staged commands and push them to the device.
+
+Shows the exact CLI commands that will be sent and asks for confirmation.
+Once the device confirms the push, C2Sync re-fetches the running config,
+writes it to device.config, and commits it, advancing the baseline.
+
+Options:
+  -y  Skip the confirmation prompt.
+
+A command the device rejects aborts the batch, but commands that already
+applied are not rolled back automatically. Use `c2sync revert` to recover.
+""",
+
+    'commit': """
+Usage: c2sync commit [-y]
+
+Save the device's running config to its startup config.
+
+Recorded as an empty git commit, since there is no file change to stage for
+this milestone.
+
+Options:
+  -y  Skip the confirmation prompt.
+
+Refuses to run while you have unsynced local edits, which would save state
+you did not intend, and does nothing when the running config is already
+saved.
+""",
+
+    'discard': """
+Usage: c2sync discard
+
+Throw away local edits and return to the last confirmed sync.
+
+Reverts device.config to its content at git HEAD and clears staging, so the
+discarded edits cannot quietly be re-staged on the next status or sync. Does
+not touch the device.
+""",
+
+    'revert': """
+Usage: c2sync revert [COMMIT] [-y] [--force|-f]
+
+Push the device's running config back to a past commit.
+
+The recovery path for a bad push, e.g. a batch where one command was rejected
+after others had already landed. Unlike every other command, the diff is taken
+against a config fetched fresh from the device right now: after something has
+gone wrong, neither device.config nor the git baseline is guaranteed to match
+what is actually running.
+
+Arguments:
+  COMMIT  Commit to restore (default: HEAD, the last confirmed sync)
+
+Options:
+  -y           Skip the push confirmation prompt.
+  --force, -f  Overwrite unsynced local edits.
+
+-y and --force are independent on purpose: -y skips only the preview prompt,
+and --force is the only thing that permits discarding local edits.
+
+Modeled on `git revert` rather than `git reset --hard` -- it makes a new
+commit recording the recovered state, so the incident stays visible in the
+log instead of being erased.
+""",
+}
+
+
+def _print_help(command=None) -> None:
+    """
+    Print help for a single command, falling back to the top-level usage for
+    a missing or unrecognized one so `c2sync help bogus` still says something
+    useful rather than erroring.
+    """
+    text = COMMAND_HELP.get(command)
+    print(text.strip('\n') if text else USAGE)
 
 def main():
     arguments = sys.argv[1:]
@@ -49,8 +179,17 @@ def main():
     command = arguments[0]
     command_arguments = arguments[1:]
 
-    if command in HELP_COMMANDS or any(a in HELP_FLAGS for a in command_arguments):
-        print(USAGE)
+    # `c2sync help COMMAND` / `c2sync --help COMMAND`, and bare `c2sync help`.
+    if command in HELP_COMMANDS:
+        _print_help(command_arguments[0] if command_arguments else None)
+        return
+
+    # `c2sync COMMAND --help`. Checked across all of the command's arguments so
+    # the flag is caught wherever it lands, including in a position the command
+    # would otherwise read as a value (`c2sync init --help` must not start a
+    # project for a device named '--help').
+    if any(a in HELP_FLAGS for a in command_arguments):
+        _print_help(command)
         return
 
     match command:

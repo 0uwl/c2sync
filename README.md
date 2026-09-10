@@ -117,9 +117,11 @@ Commands:
   help                                Show this message (also -h, --help)
 ```
 
-`-h`/`--help` work anywhere on the line, so `c2sync init --help` shows usage rather than
-being read as a device path. Bare `c2sync` prints the same thing. An unrecognized
-command prints usage to stderr and exits 1.
+Every command has its own help: `c2sync COMMAND --help` (or `c2sync help COMMAND`)
+prints that command's usage, arguments and flags. `-h`/`--help` are recognized anywhere
+on the line, so `c2sync init --help` shows help rather than being read as a device path.
+Bare `c2sync`, `c2sync help` and `c2sync --help` all print the command list. An
+unrecognized command prints usage to stderr and exits 1.
 
 ## General workflow
 

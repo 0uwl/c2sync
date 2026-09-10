@@ -249,14 +249,26 @@ commit when the recovered content already matches `HEAD`, exactly like
 already rely on). `host_dirty`/`device_dirty` transition the same way a successful
 `sync` does.
 
-`main()` handles help before dispatching: `help`, `-h` and `--help` as the command all
-print `USAGE` to stdout and return 0, as does bare `c2sync`. `-h`/`--help` are also
-honoured *anywhere in a command's arguments*, so `c2sync init --help` prints usage
-rather than starting a project for a device literally named `--help` — `init` treats its
-first argument as a serial device path, so without this the flag would be taken as one.
-(`help` is deliberately only recognized as the command itself, so it stays usable as a
-`revert` commit-ish.) An unrecognized command logs an error, prints `USAGE` to **stderr**
-and exits **1**, so a script can tell a typo from a help request.
+`main()` handles help before dispatching, via `_print_help()` and the `COMMAND_HELP`
+dict (one entry per command, holding its own usage line, arguments, flags and the
+reasoning behind them):
+
+- `help`, `-h`, `--help` as the command, and bare `c2sync`, print the top-level `USAGE`
+  to stdout and return 0.
+- `c2sync help COMMAND` and `c2sync COMMAND --help` both print that command's entry
+  from `COMMAND_HELP`; an unrecognized topic falls back to `USAGE` rather than erroring.
+- `-h`/`--help` are matched *anywhere in a command's arguments*, not just the first
+  position. This is load-bearing, not defensive: `init` reads its first argument as a
+  serial device path, so `c2sync init --help` would otherwise start a project for a
+  device literally named `--help`. `help` is deliberately recognized only as the command
+  itself, so it stays usable as a `revert` commit-ish.
+- An unrecognized command logs an error, prints `USAGE` to **stderr** and exits **1**,
+  so a script can tell a typo from a help request.
+
+`test_every_command_has_help_text` asserts `COMMAND_HELP`'s keys match the dispatched
+commands exactly, so a new command added to the `match` without help text fails the
+suite instead of silently falling back to `USAGE`. Note the top-level `USAGE` also
+lists each command's flags, so a flag change needs editing in both places.
 
 `pull`, `sync`, `commit`, and `revert` all connect through `_connected()`, a
 `@contextmanager` wrapping `_connect()` in `try`/`finally` so `interface.disconnect()`
@@ -397,8 +409,6 @@ that `c2sync --help` runs and that `c2sync.main`/`connector`/`differ`/`git_ops` 
 - The release archive is Linux-only and tied to the build host's architecture (see
   Build and distribution above). Distro packages (`.deb`/`.rpm`) and PyPI are possible
   later, deliberately not now.
-- No per-command help text; `-h`/`--help` anywhere on the line prints the same
-  top-level `USAGE` (see CLI surface above), it does not describe just that command.
 
 ## Roadmap and active design decisions
 

@@ -648,9 +648,12 @@ def test_help_prints_usage_to_stdout_and_exits_cleanly(argv, monkeypatch, capsys
     assert captured.err == ''
 
 
-@pytest.mark.parametrize('command', ['init', 'pull', 'sync', 'commit', 'revert'])
+ALL_COMMANDS = ['init', 'pull', 'status', 'sync', 'commit', 'discard', 'revert']
+
+
+@pytest.mark.parametrize('command', ALL_COMMANDS)
 @pytest.mark.parametrize('flag', ['-h', '--help'])
-def test_help_flag_after_a_command_prints_usage_without_running_it(
+def test_help_flag_after_a_command_prints_its_own_help_without_running_it(
     command, flag, monkeypatch, capsys, tmp_path
 ):
     # Guards a real footgun: without this, `c2sync init --help` would start a
@@ -660,8 +663,45 @@ def test_help_flag_after_a_command_prints_usage_without_running_it(
 
     main_module.main()
 
-    assert 'Usage:' in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert f'Usage: c2sync {command}' in out
     assert not (tmp_path / '.c2sync').exists()
+
+
+@pytest.mark.parametrize('command', ALL_COMMANDS)
+def test_help_subcommand_prints_that_commands_help(command, monkeypatch, capsys):
+    monkeypatch.setattr('sys.argv', ['c2sync', 'help', command])
+
+    main_module.main()
+
+    assert f'Usage: c2sync {command}' in capsys.readouterr().out
+
+
+def test_every_command_has_help_text():
+    # A new command added to the dispatch without help text should fail here
+    # rather than silently falling back to the top-level usage.
+    assert sorted(main_module.COMMAND_HELP) == sorted(ALL_COMMANDS)
+
+
+@pytest.mark.parametrize('command', ALL_COMMANDS)
+def test_help_flag_is_caught_in_any_argument_position(command, monkeypatch, capsys, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr('sys.argv', ['c2sync', command, 'somevalue', '--help'])
+
+    main_module.main()
+
+    assert f'Usage: c2sync {command}' in capsys.readouterr().out
+    assert not (tmp_path / '.c2sync').exists()
+
+
+def test_help_for_unknown_topic_falls_back_to_top_level_usage(monkeypatch, capsys):
+    monkeypatch.setattr('sys.argv', ['c2sync', 'help', 'bogus'])
+
+    main_module.main()
+
+    out = capsys.readouterr().out
+    assert 'Usage:' in out
+    assert 'Commands:' in out
 
 
 def test_unknown_command_exits_nonzero_with_usage_on_stderr(monkeypatch, capsys):
