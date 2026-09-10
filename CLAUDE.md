@@ -33,11 +33,12 @@ pytest c2sync/tests/test_differ.py::test_refresh_staging_stages_additions_with_c
 # anything beyond `init`/`status`/`discard`)
 c2sync init /dev/ttyUSB0 [BAUDRATE]     # serial transport
 c2sync init --ssh HOST [PORT]           # SSH transport
-c2sync pull [-y]
+c2sync pull [--force|-f]
 c2sync status
 c2sync sync [-y]
 c2sync commit [-y]
 c2sync discard
+c2sync revert [COMMIT] [-y] [--force|-f]   # COMMIT defaults to HEAD
 ```
 
 All tests are mocked at the Netmiko/`ConnectHandler` boundary — no real hardware,
@@ -82,7 +83,7 @@ relative to cwd — commands must be run from the project directory.
 | `c2sync/user_config.py` | Reads the optional global TOML preferences file — `load()`/`config_path()` |
 | `c2sync/state_engine.py` | `StateEngine` — `host_dirty`/`device_dirty` tracking |
 | `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigSaveError`, `HostKeyRejectedError` |
-| `c2sync/main.py` | CLI entry point: `init` / `pull` / `status` / `sync` / `commit` / `discard` |
+| `c2sync/main.py` | CLI entry point: `init` / `pull` / `status` / `sync` / `commit` / `discard` / `revert` |
 
 ### Diff → CLI command translation (`differ.py`)
 
@@ -189,13 +190,15 @@ returns — never optimistically.
 
 ### CLI surface (`main.py`)
 
-Actual commands: `init`, `pull`, `status`, `sync`, `commit`, `discard`. `pull` connects,
-fetches `show running-config brief`, writes it to `EDIT_FILE`, and commits it — this is
-how an already-configured device gets onboarded (`init` alone only creates an empty
-`device.config`), and it doubles as a way to resync the baseline if the device changed
-out-of-band. It refuses to run while `host_dirty` unless passed `-y` (would silently
-clobber uncommitted local edits); when not `host_dirty` it needs no confirmation at all,
-since there's nothing local to lose. `status` is read-only
+Actual commands: `init`, `pull`, `status`, `sync`, `commit`, `discard`, `revert`. `pull`
+connects, fetches `show running-config brief`, writes it to `EDIT_FILE`, and commits it
+— this is how an already-configured device gets onboarded (`init` alone only creates an
+empty `device.config`), and it doubles as a way to resync the baseline if the device
+changed out-of-band. It refuses to run while `host_dirty` unless passed `--force`/`-f`
+(would silently clobber uncommitted local edits); when not `host_dirty` it needs no
+confirmation at all, since there's nothing local to lose. `pull` has no `-y` — it has no
+other prompt to skip, so (like `revert`, see below) the overwrite-approval flag is
+`--force`/`-f` specifically, never a generic "don't ask me anything" flag. `status` is read-only
 (recomputes staging, prints state + preview, never connects to the device — this is the
 `git status` analog). `sync` pushes, then re-fetches `show running-config brief`,
 writes it to `EDIT_FILE`, and makes a real git commit in `PROJECT_DIR` (`git_ops.
@@ -211,6 +214,42 @@ staging) so discarded edits can't get silently re-staged on the next check.
 `c2sync` intentionally does not wrap `git log`/`diff`/`branch`/PR review; the same
 repo is a normal git repo the user can drive directly with `git` or push to
 GitHub/GitLab for review.
+
+`revert [COMMIT] [-y] [--force|-f]` is the manual recovery path for a bad push (e.g. a
+batch where command 3 of 8 got rejected after 1-2 already landed) — see Known
+constraints. `COMMIT` defaults to `HEAD` (the last confirmed sync). Unlike every other
+command here, it diffs against a config fetched **fresh from the device right now**,
+not `EDIT_FILE` — after something's gone wrong, neither `EDIT_FILE` nor the git
+baseline is guaranteed to reflect what's actually running, only the device itself is.
+Refuses to run while `host_dirty` unless `--force`/`-f` is passed — reverting
+overwrites `EDIT_FILE` with the post-revert device state, which would otherwise
+silently discard unsynced local edits. `-y` and `--force` are deliberately independent
+flags: `-y` only skips the push-preview confirmation, `--force` is the only thing that
+permits overwriting `host_dirty` edits — a user reaching for `-y` just to skip the
+prompt shouldn't be able to lose local work as a side effect they didn't ask for.
+Sequence: the `host_dirty` check, then `git_ops.resolve_rev()` the target (raises
+`git_ops.GitError` on a typo'd commit — this must never silently fall back to an empty
+target, which would try to strip the entire device config), `git_ops.show_at()` that
+commit's `device.config` (deliberately not the soft-fallback `show_at_head()` — a bad
+rev here must be a hard error too), connect and fetch the live running-config,
+`Differ.diff_lines(live, target)`, preview and confirm (or `-y`), `apply_config()`. On
+success it re-fetches and writes `EDIT_FILE`, same as `sync`. Modeled on `git revert`,
+not `git reset --hard`: it makes a **new** commit recording the recovered state rather
+than rewinding `HEAD`, so the incident stays visible in `git log` (and is a no-op
+commit when the recovered content already matches `HEAD`, exactly like
+`git_ops.commit()`'s existing "nothing changed" short-circuit that `sync`/`pull`
+already rely on). `host_dirty`/`device_dirty` transition the same way a successful
+`sync` does.
+
+`pull`, `sync`, `commit`, and `revert` all connect through `_connected()`, a
+`@contextmanager` wrapping `_connect()` in `try`/`finally` so `interface.disconnect()`
+always runs — including when a call inside the block raises (a rejected push, a
+dropped session mid-fetch) or the function returns early — rather than every command
+scattering its own `interface.disconnect()` before each exit point. `Project.
+edit_file_relpath` (`c2sync/__init__.py`) is the one place `os.path.relpath(EDIT_FILE,
+PROJECT_DIR)` is computed — every `git_ops` call site (which run with `git -C
+PROJECT_DIR ...`, so need the path relative to it) uses that property instead of
+recomputing it.
 
 `_connect()` in `main.py` resolves `username` from `C2SYNC_USERNAME`, then the global
 config's `username` key (see Global user config below); `password` only from
@@ -265,8 +304,11 @@ but broken config is very likely a real mistake worth surfacing.
 
 - Cisco IOS only; `device_type='cisco_ios'` is hardcoded in `connector.py`, and
   `Diff(..., syntax='ios')` is hardcoded in `differ.py`.
-- No rollback if command N of a multi-command batch is rejected after N-1 already
-  landed on the device.
+- No *automatic* rollback if command N of a multi-command batch is rejected after
+  N-1 already landed on the device — `apply_config` aborts the batch but doesn't
+  undo what already applied. `c2sync revert` (see CLI surface above) is the manual
+  recovery path: it diffs the live device against a past commit and pushes the
+  correction.
 - No file locking on `state.json`/`staging.txt` — fine for one interactive CLI
   invocation at a time, not safe for concurrent access.
 

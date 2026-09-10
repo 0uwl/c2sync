@@ -48,11 +48,12 @@ c2sync COMMAND
 Commands:
   init      SERIAL_DEVICE [BAUDRATE]  Start a project for one device over serial
   init      --ssh HOST [PORT]         Start a project for one device over SSH
-  pull      [-y]                      Fetch the device's running config and make it the new baseline
+  pull      [--force|-f]               Fetch the device's running config and make it the new baseline
   status                              Show whether there are unsynced local edits or an unsaved device change
   sync      [-y]                      Preview and push staged changes to the device
   commit    [-y]                      Save the device's running config to its startup config
   discard                             Revert local edits back to the last confirmed sync
+  revert    [COMMIT] [-y] [--force|-f]  Push the device back to a past commit (default: HEAD)
 ```
 
 ## General workflow
@@ -72,12 +73,12 @@ Behavior:
 ### 2. Pull
 
 ```
-c2sync pull [-y]
+c2sync pull [--force|-f]
 ```
 Behavior:
 * Connects to the device, fetches the running config, and commits it as the new baseline — this is how you onboard a device that's already configured (`init` alone only creates an empty `device.config`)
 * Also useful later to resync the baseline if the device changed outside of C2Sync
-* Refuses to run if you have unsynced local edits, unless `-y` is passed to overwrite them
+* Refuses to run if you have unsynced local edits, unless `--force`/`-f` is passed to overwrite them — there's no `-y` here, since pull has no other prompt to skip; a flag that only means "overwrite my local edits" shouldn't be spelled the same as "don't ask me anything"
 
 ### 3. Local Editing
 
@@ -152,6 +153,19 @@ c2sync discard
 ```
 Behavior:
 * Reverts local edits back to the last confirmed sync (`device.config` at git `HEAD`) and clears anything staged
+
+### 8. Revert
+
+```
+c2sync revert [COMMIT] [-y] [--force|-f]
+```
+Behavior:
+* Recovers a device that's ended up in a bad state — e.g. a `sync` where one command in the middle of a batch got rejected after earlier ones already landed
+* Fetches the running config from the device **right now** and diffs it against `COMMIT` (a past commit's `device.config`, `HEAD` if omitted) — not your local `device.config`, since after something's gone wrong that file isn't guaranteed to reflect what's actually running either
+* Displays the commands needed to bring the device back to that commit's config, then pushes them if confirmed (or `-y`)
+* Refuses to run if you have unsynced local edits, unless `--force`/`-f` is passed — reverting overwrites `device.config` with the post-revert device state, which would otherwise silently lose those edits. `-y` and `--force` are separate on purpose: `-y` only skips the push confirmation, `--force` is what's required to overwrite local edits — so skipping the prompt can never lose work by accident
+* Records the recovery as a **new** git commit rather than moving `HEAD` backward, like `git revert` rather than `git reset --hard` — the incident stays visible in `git log` instead of being erased
+* If the device already matches the target commit, it says so and doesn't push anything
 
 ## Credentials
 
