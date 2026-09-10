@@ -39,7 +39,7 @@ class Project:
     def target(self) -> str:
         """
         The single human-readable identifier for whichever device this
-        project points at - a serial path or a hostname/IP - used in git
+        project points at (a serial path or a hostname/IP), used in git
         commit messages and the like so callers don't need to branch on
         TRANSPORT themselves.
         """

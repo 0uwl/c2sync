@@ -8,7 +8,7 @@ from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutExc
 from c2sync import Project, get_project, git_ops, init_project, user_config
 from c2sync.connector import DeviceInterface
 from c2sync.differ import Differ
-from c2sync.exceptions import ConfigApplyError, ConfigSaveError
+from c2sync.exceptions import ConfigApplyError, ConfigSaveError, HostKeyRejectedError
 from c2sync.state_engine import StateEngine
 
 LOGGER = logging.getLogger(__name__)
@@ -285,10 +285,21 @@ def _connect(project: Project) -> DeviceInterface:
         password = password or getpass.getpass('Password: ')
         secret = getpass.getpass('Enable secret (leave blank if none): ') or None
 
+    # Off by default: prompting to trust a never-seen host key is a
+    # convenience, but it's a materially different (weaker) trust model
+    # than "verify against what's already known" - see connector.py.
+    prompt_for_unknown_hosts = bool(config.get('prompt_for_unknown_ssh_hosts', False))
+
     try:
-        interface = DeviceInterface(project, username=username, password=password, secret=secret)
+        interface = DeviceInterface(
+            project,
+            username=username,
+            password=password,
+            secret=secret,
+            prompt_for_unknown_hosts=prompt_for_unknown_hosts,
+        )
         interface.initialize_session()
         return interface
-    except (NetmikoAuthenticationException, NetmikoTimeoutException) as e:
+    except (NetmikoAuthenticationException, NetmikoTimeoutException, HostKeyRejectedError) as e:
         print(f'Could not connect to device: {e}')
         sys.exit(1)

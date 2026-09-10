@@ -67,7 +67,7 @@ Behavior:
 * Creates a new project in the current working directory (`./.c2sync/`) for one device, reached over serial or SSH
 * Initializes a git repository there and makes the first commit (an empty `device.config`)
 * Serial: `BAUDRATE` defaults to 9600, or to the global config's `baudrate` if set (see Configuration below)
-* SSH: `PORT` defaults to 22, or to the global config's `ssh_port` if set
+* SSH: `PORT` defaults to 22, or to the global config's `ssh_port` if set. Host keys are verified against your `~/.ssh/known_hosts`, same as a plain `ssh` client — trust the device's key there first (e.g. `ssh user@host` once) if you haven't already, or C2Sync will refuse to connect
 
 ### 2. Pull
 
@@ -170,11 +170,14 @@ An optional TOML file at `~/.config/c2sync/config.toml` (or `$XDG_CONFIG_HOME/c2
 username = "admin"
 baudrate = 115200
 ssh_port = 22
+prompt_for_unknown_ssh_hosts = false
 timeout = 600
 prompt_regex = '[>#]\s?$'
 ```
 
 Every key is optional and already has a working default without this file. Passwords and enable-secrets are intentionally never stored here — see Credentials above.
+
+`prompt_for_unknown_ssh_hosts` defaults to `false`: an SSH host not already in your `~/.ssh/known_hosts` fails to connect (see Init above) rather than prompting. Set it to `true` to get an OpenSSH-style prompt instead (fingerprint shown, `yes`/`no`), and a `yes` adds the key to `known_hosts` for next time. A host whose key *changed* (as opposed to one that's simply new) always fails hard either way; this setting only ever affects genuinely first-time connections.
 
 ## Potential Future Features
 
