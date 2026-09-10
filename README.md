@@ -102,26 +102,34 @@ missing transitive wheel only surfaces at import time, not at launch.
 
 ## Usage
 ### CLI Commands
+
+`c2sync --help` lists the commands:
+
 ```
-c2sync COMMAND
+Usage:
+c2sync COMMAND [ARGS]
 
 Commands:
-  init      SERIAL_DEVICE [BAUDRATE]  Start a project for one device over serial
-  init      --ssh HOST [PORT]         Start a project for one device over SSH
-  pull      [--force|-f]               Fetch the device's running config and make it the new baseline
-  status                              Show whether there are unsynced local edits or an unsaved device change
-  sync      [-y]                      Preview and push staged changes to the device
-  commit    [-y]                      Save the device's running config to its startup config
-  discard                             Revert local edits back to the last confirmed sync
-  revert    [COMMIT] [-y] [--force|-f]  Push the device back to a past commit (default: HEAD)
-  help                                Show this message (also -h, --help)
+    init      Start a project for one device in the current directory
+    pull      Fetch the device's running config and make it the new baseline
+    status    Show unsynced local edits and unsaved device changes
+    sync      Preview the staged commands and push them to the device
+    commit    Save the device's running config to its startup config
+    discard   Throw away local edits and return to the last confirmed sync
+    revert    Push the device's running config back to a past commit
+    help      Show this message (also -h, --help)
+
+Run `c2sync COMMAND --help` for detail on a single command.
 ```
 
-Every command has its own help: `c2sync COMMAND --help` (or `c2sync help COMMAND`)
-prints that command's usage, arguments and flags. `-h`/`--help` are recognized anywhere
-on the line, so `c2sync init --help` shows help rather than being read as a device path.
-Bare `c2sync`, `c2sync help` and `c2sync --help` all print the command list. An
-unrecognized command prints usage to stderr and exits 1.
+Arguments and flags live in each command's own help rather than the summary above:
+`c2sync COMMAND --help` (or `c2sync help COMMAND`) prints that command's usage,
+arguments and flags. `-h`/`--help` are recognized anywhere on the line, so
+`c2sync init --help` shows help rather than being read as a device path. Bare `c2sync`,
+`c2sync help` and `c2sync --help` all print the command list. An unrecognized command
+prints usage to stderr and exits 1.
+
+Each command is covered in detail under General workflow below.
 
 ## General workflow
 

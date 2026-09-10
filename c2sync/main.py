@@ -15,22 +15,21 @@ from c2sync.state_engine import StateEngine
 
 LOGGER = logging.getLogger(__name__)
 
+# One line per command, no flags: arguments and flags live in COMMAND_HELP
+# below, so there is exactly one place to edit when they change.
 USAGE = """
 Usage:
-c2sync COMMAND
+c2sync COMMAND [ARGS]
 
 Commands:
-    init         Start a C2Sync session in the current working directory
-    pull         Fetch the device's running config and make it the new baseline
-                 [--force|-f]  required to overwrite unsynced local edits
-    status       Show whether the local config file has unsynced edits
-    sync         Preview changes and confirm or abort them
-    commit       Issues the command to save the running config to the startup config on the device
-    discard      Cancel the current C2Sync session
-    revert       Push the device's running config back to a past commit (HEAD by default)
-                 [COMMIT] [-y] [--force|-f]  -y skips the push confirmation; --force/-f
-                 is required to overwrite unsynced local edits
-    help         Show this message (also -h, --help)
+    init      Start a project for one device in the current directory
+    pull      Fetch the device's running config and make it the new baseline
+    status    Show unsynced local edits and unsaved device changes
+    sync      Preview the staged commands and push them to the device
+    commit    Save the device's running config to its startup config
+    discard   Throw away local edits and return to the last confirmed sync
+    revert    Push the device's running config back to a past commit
+    help      Show this message (also -h, --help)
 
 Run `c2sync COMMAND --help` for detail on a single command.
 """

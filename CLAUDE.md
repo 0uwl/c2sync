@@ -267,8 +267,9 @@ reasoning behind them):
 
 `test_every_command_has_help_text` asserts `COMMAND_HELP`'s keys match the dispatched
 commands exactly, so a new command added to the `match` without help text fails the
-suite instead of silently falling back to `USAGE`. Note the top-level `USAGE` also
-lists each command's flags, so a flag change needs editing in both places.
+suite instead of silently falling back to `USAGE`. The top-level `USAGE` is deliberately one
+line per command with no flags — arguments and flags live only in `COMMAND_HELP`, so
+there is a single place to edit when they change.
 
 `pull`, `sync`, `commit`, and `revert` all connect through `_connected()`, a
 `@contextmanager` wrapping `_connect()` in `try`/`finally` so `interface.disconnect()`
