@@ -9,7 +9,7 @@ The tool lets you:
 * Track a device's running configuration in a local git repository
 * Edit the configuration locally using the text editor of your choice (e.g. VS Code)
 * Diff your edits against a real Cisco IOS configuration tree, including deletions, not just added lines
-* Push changes back to the device over serial or SSH, verified against the device's own response before anything is considered synced
+* Push changes back to the device over serial or SSH, verified against the device's own response before anything is considered applied
 * Save the running configuration to the startup configuration
 
 Cisco IOS only, one device per project — a deliberate starting scope, not an oversight. Both multi-device and multi-vendor support are wanted future directions rather than rejected ones; they are just not current scope (see Potential Future Features below).
@@ -18,15 +18,15 @@ Cisco IOS only, one device per project — a deliberate starting scope, not an o
 
 * Focus on simplicity, reliability, and CLI correctness
 * Simplify the experience of managing device config over serial or SSH
-* Every project is a real git repository — c2sync commits at defined lifecycle points (confirmed sync/commit), but doesn't reimplement `diff`/`log`/`branch`/PR review. Use your normal git tooling directly against the project directory, and push it to GitHub/GitLab for review like any other repo
+* Every project is a real git repository — c2sync commits at defined lifecycle points (confirmed push/save), but doesn't reimplement `diff`/`log`/`branch`/PR review. Use your normal git tooling directly against the project directory, and push it to GitHub/GitLab for review like any other repo
 * Users should already be comfortable with Cisco IOS CLI syntax
 
 ## Key Features
 
 Each `c2sync init` creates a project (`./.c2sync/`) for **one device**. The project directory is a real git repository:
 
-* `device.config` — the file you edit, tracked in git with one commit per confirmed sync (plus an empty commit marking each save to startup-config)
-* Local edits are diffed against the last confirmed sync — `device.config` as of git `HEAD` — on demand, not via a background watcher, the same model as `git status`
+* `device.config` — the file you edit, tracked in git with one commit per confirmed push (plus an empty commit marking each save to startup-config)
+* Local edits are diffed against the last confirmed push — `device.config` as of git `HEAD` — on demand, not via a background watcher, the same model as `git status`
 * Staged changes are rebuilt into Cisco IOS CLI commands that respect configuration context (see Local Editing below)
 * Pushes are verified against the device's own response; a rejected command aborts the whole push instead of partially applying
 
@@ -75,7 +75,7 @@ pip install -e ".[dev]"    # omit [dev] if you don't need the test suite
 
 Requires Python 3.11+ (for reading the optional global config file, see Configuration
 below) and a real or mocked device connection for anything beyond `init`/`status`/
-`discard` — `pull`/`sync`/`commit` all need to reach the device, over serial or SSH.
+`discard` — `pull`/`push`/`save` all need to reach the device, over serial or SSH.
 
 ## Building a release archive
 
@@ -221,10 +221,10 @@ c2sync COMMAND [ARGS]
 Commands:
     init      Start a project for one device in the current directory
     pull      Fetch the device's running config and make it the new baseline
-    status    Show unsynced local edits and unsaved device changes
-    sync      Preview the staged commands and push them to the device
-    commit    Save the device's running config to its startup config
-    discard   Throw away local edits and return to the last confirmed sync
+    status    Show unpushed local edits and unsaved device changes
+    push      Preview the staged commands and push them to the device
+    save      Save the device's running config to its startup config
+    discard   Throw away local edits and return to the last confirmed push
     revert    Push the device's running config back to a past commit
     help      Show this message (also -h, --help)
 
@@ -262,13 +262,13 @@ c2sync pull [--force|-f]
 Behavior:
 * Connects to the device, fetches the running config, and commits it as the new baseline — this is how you onboard a device that's already configured (`init` alone only creates an empty `device.config`)
 * Also useful later to resync the baseline if the device changed outside of C2Sync
-* Refuses to run if you have unsynced local edits, unless `--force`/`-f` is passed to overwrite them — there's no `-y` here, since pull has no other prompt to skip; a flag that only means "overwrite my local edits" shouldn't be spelled the same as "don't ask me anything"
+* Refuses to run if you have unpushed local edits, unless `--force`/`-f` is passed to overwrite them — there's no `-y` here, since pull has no other prompt to skip; a flag that only means "overwrite my local edits" shouldn't be spelled the same as "don't ask me anything"
 
 ### 3. Local Editing
 
 The user edits `./.c2sync/device.config` with the text editor of their choice, using normal Cisco IOS CLI syntax. Just delete a line to remove it — C2Sync parses the config into a real tree (via `ciscoconfparse2`) and generates the correct `no <command>` for you; you don't need to type the negation yourself, though it still works fine if you do.
 
-When `status`/`sync` recompute staging, C2Sync diffs the parsed tree against the last confirmed baseline and writes the exact commands that would be sent to `./.c2sync/staging.txt`.
+When `status`/`push` recompute staging, C2Sync diffs the parsed tree against the last confirmed baseline and writes the exact commands that would be sent to `./.c2sync/staging.txt`.
 
 Example:
 ```
@@ -290,7 +290,7 @@ interface GigabitEthernet1/0/1
  no description Server
  switchport nonegotiate
 ```
-This preserves context and means the entire configuration doesn't need to be sent back to the device every time changes are pushed. After `sync`, the device's config would look like this:
+This preserves context and means the entire configuration doesn't need to be sent back to the device every time changes are pushed. After `push`, the device's config would look like this:
 ```
 interface GigabitEthernet1/0/1
  switchport mode access
@@ -304,30 +304,33 @@ interface GigabitEthernet1/0/1
 c2sync status
 ```
 Behavior:
-* Shows whether the local file has unsynced edits (`host pending changes`), the device has pushed-but-unsaved changes (`device pending changes`), or everything is `synced`
-* Previews the exact CLI commands that `sync` would send
+* Shows whether the local file has unpushed edits (`host pending changes`), the device has pushed-but-unsaved changes (`device pending changes`), or everything is `synced`
+* Previews the exact CLI commands that `push` would send
 * Read-only — never connects to the device
 
-### 5. Sync
+### 5. Push
 
 ```
-c2sync sync [-y]
+c2sync push [-y] [--rollback-on-error]
 
 Options:
-    -y    Push without an interactive confirmation prompt
+    -y                   Push without an interactive confirmation prompt
+    --rollback-on-error  Offer to undo a partially-applied push
 ```
 Behavior:
 * Displays the commands that will be sent, then pushes them if confirmed
 * Re-fetches the running config and commits it to the project's git repository — this becomes the new baseline for the next diff
+* If the device rejects a command partway, the commands before it stay on the device. C2Sync always re-reads the running config at that point and moves the baseline to match, so `status` shows only what's still outstanding and your edits are left alone — it does not undo the push
+* `--rollback-on-error` additionally offers to push the device back to the pre-push baseline. It's opt-in because undoing means sending more config to a device that just rejected some, and a negation isn't always a safe inverse (undoing an address or interface change can cut the session doing it). It previews and asks first unless `-y` is also given
 
-### 6. Commit
+### 6. Save
 
 ```
-c2sync commit [-y]
+c2sync save [-y]
 ```
 Behavior:
-* Saves the device's running config to its startup config
-* Refuses to run while there are unsynced local edits — run `sync` first
+* Saves the device's running config to its startup config (`write memory`), so it survives a reload
+* Refuses to run while there are unpushed local edits — run `push` first
 * Records the save as a git commit (no file content changes, so it's an empty commit marking the milestone)
 
 ### 7. Discard
@@ -336,7 +339,7 @@ Behavior:
 c2sync discard
 ```
 Behavior:
-* Reverts local edits back to the last confirmed sync (`device.config` at git `HEAD`) and clears anything staged
+* Reverts local edits back to the last confirmed push (`device.config` at git `HEAD`) and clears anything staged
 
 ### 8. Revert
 
@@ -344,21 +347,21 @@ Behavior:
 c2sync revert [COMMIT] [-y] [--force|-f]
 ```
 Behavior:
-* Recovers a device that's ended up in a bad state — e.g. a `sync` where one command in the middle of a batch got rejected after earlier ones already landed
+* Recovers a device that's ended up in a bad state — e.g. a `push` where one command in the middle of a batch got rejected after earlier ones already landed
 * Fetches the running config from the device **right now** and diffs it against `COMMIT` (a past commit's `device.config`, `HEAD` if omitted) — not your local `device.config`, since after something's gone wrong that file isn't guaranteed to reflect what's actually running either
 * Displays the commands needed to bring the device back to that commit's config, then pushes them if confirmed (or `-y`)
-* Refuses to run if you have unsynced local edits, unless `--force`/`-f` is passed — reverting overwrites `device.config` with the post-revert device state, which would otherwise silently lose those edits. `-y` and `--force` are separate on purpose: `-y` only skips the push confirmation, `--force` is what's required to overwrite local edits — so skipping the prompt can never lose work by accident
+* Refuses to run if you have unpushed local edits, unless `--force`/`-f` is passed — reverting overwrites `device.config` with the post-revert device state, which would otherwise silently lose those edits. `-y` and `--force` are separate on purpose: `-y` only skips the push confirmation, `--force` is what's required to overwrite local edits — so skipping the prompt can never lose work by accident
 * Records the recovery as a **new** git commit rather than moving `HEAD` backward, like `git revert` rather than `git reset --hard` — the incident stays visible in `git log` instead of being erased
 * If the device already matches the target commit, it says so and doesn't push anything
 
 ## Credentials
 
-`pull`/`sync`/`commit` need to log in to the device. In order of precedence:
+`pull`/`push`/`save` need to log in to the device. In order of precedence:
 1. `C2SYNC_USERNAME` / `C2SYNC_PASSWORD` / `C2SYNC_SECRET` environment variables
 2. `username` from the global config file (see Configuration below) — password and enable-secret are never read from there
 3. An interactive prompt for whatever's still missing
 
-For CI/non-interactive use (e.g. a merged PR triggering `c2sync sync -y`), set `C2SYNC_USERNAME` and `C2SYNC_PASSWORD` from your CI system's own secrets manager. C2Sync never stores credentials itself, in this file or anywhere else.
+For CI/non-interactive use (e.g. a merged PR triggering `c2sync push -y`), set `C2SYNC_USERNAME` and `C2SYNC_PASSWORD` from your CI system's own secrets manager. C2Sync never stores credentials itself, in this file or anywhere else.
 
 ## Configuration
 
@@ -402,7 +405,7 @@ the git layer. What would need designing:
 * **Per-device state.** `state.json`'s `host_dirty`/`device_dirty` pair is per-project
   today and would become per-device, as would `staging.txt`.
 * **Device selection and bulk operations.** Commands would need a device selector, and
-  `status` across a fleet is genuinely useful. `sync` across many devices is the hard
+  `status` across a fleet is genuinely useful. `push` across many devices is the hard
   part: partial failure (device 3 of 8 rejects a command) needs a defined outcome, and
   the existing single-device answer — abort the batch, recover with `c2sync revert` —
   does not obviously generalise to a fleet.
@@ -414,12 +417,12 @@ the git layer. What would need designing:
 
 C2Sync is Cisco IOS only today. Supporting another vendor means more than swapping Netmiko's `device_type` — the diff engine and the device's own workflow both matter:
 
-* **NX-OS** — the more realistic near-term target. `ciscoconfparse2`'s diff engine (`hier_config`) already treats `nxos` as a first-class syntax rather than a fallback, and NX-OS keeps the same running-config/startup-config duality as IOS classic, so C2Sync's `sync`-then-`commit` model and state tracking would carry over largely unchanged. Would still need `device_type='cisco_nxos'`, plus NX-OS-specific error/save-confirmation patterns in `connector.py` — its "invalid command" and `copy run start` output wording differs from classic IOS.
-* **JunOS** — a bigger lift. `ciscoconfparse2` parses JunOS config into a correct tree, but its diff/remediation engine currently falls back to IOS rules for `syntax='junos'` rather than real JunOS logic, and produces invalid syntax (`no set ...` instead of JunOS's `delete ...`). JunOS's candidate/commit model also has no separate running-vs-startup-config step the way IOS does, so the `sync`/`commit` split and `state_engine.py`'s dirty-state tracking would need real rework, not just a new device type.
+* **NX-OS** — the more realistic near-term target. `ciscoconfparse2`'s diff engine (`hier_config`) already treats `nxos` as a first-class syntax rather than a fallback, and NX-OS keeps the same running-config/startup-config duality as IOS classic, so C2Sync's `push`-then-`save` model and state tracking would carry over largely unchanged. Would still need `device_type='cisco_nxos'`, plus NX-OS-specific error/save-confirmation patterns in `connector.py` — its "invalid command" and `copy run start` output wording differs from classic IOS.
+* **JunOS** — a bigger lift. `ciscoconfparse2` parses JunOS config into a correct tree, but its diff/remediation engine currently falls back to IOS rules for `syntax='junos'` rather than real JunOS logic, and produces invalid syntax (`no set ...` instead of JunOS's `delete ...`). JunOS's candidate/commit model also has no separate running-vs-startup-config step the way IOS does, so the `push`/`save` split and `state_engine.py`'s dirty-state tracking would need real rework, not just a new device type.
 
 ### Pushing to a remote
 
-Considered, and deliberately not built: auto-pushing the project's git repo to a remote after a confirmed `sync`/`commit`. Git already solves this better than C2Sync could — add a `post-commit` hook and every commit C2Sync makes gets mirrored automatically, with no new credential surface (it reuses whatever git push auth you already have set up) and no risk of a push failure ever affecting a device push that already succeeded:
+Considered, and deliberately not built: auto-pushing the project's git repo to a remote after a confirmed `push`/`save`. Git already solves this better than C2Sync could — add a `post-commit` hook and every commit C2Sync makes gets mirrored automatically, with no new credential surface (it reuses whatever git push auth you already have set up) and no risk of a push failure ever affecting a device push that already succeeded:
 
 ```bash
 cat > .c2sync/.git/hooks/post-commit <<'EOF'
@@ -431,7 +434,7 @@ chmod +x .c2sync/.git/hooks/post-commit
 
 ## Disclaimer
 * This tool assumes familiarity with network device CLI. You must adhere to Cisco IOS' configuration syntax
-* The tool does not validate commands before sending. You must review the preview yourself before confirming a `sync`
+* The tool does not validate commands before sending. You must review the preview yourself before confirming a `push`
 
 ## License
 MIT

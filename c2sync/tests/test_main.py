@@ -53,7 +53,7 @@ def test_connect_uses_env_credentials_without_prompting(project, monkeypatch):
     with patch('c2sync.connector.ConnectHandler', return_value=mock_conn), \
          patch('builtins.input', side_effect=_fail_if_prompted), \
          patch('getpass.getpass', side_effect=_fail_if_prompted):
-        main_module.sync(['-y'])
+        main_module.push(['-y'])
 
     assert StateEngine(project).state.device_dirty is True
 
@@ -71,7 +71,7 @@ def test_connect_falls_back_to_prompt_when_env_partially_set(project, monkeypatc
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
-        main_module.sync(['-y'])
+        main_module.push(['-y'])
 
     assert StateEngine(project).state.device_dirty is True
 
@@ -94,7 +94,7 @@ def test_connect_uses_username_from_global_config(project, monkeypatch):
          patch('c2sync.main.user_config.load', return_value={'username': 'admin'}), \
          patch('builtins.input', side_effect=_fail_if_prompted), \
          patch('getpass.getpass', side_effect=['pw', '']):
-        main_module.sync(['-y'])
+        main_module.push(['-y'])
 
     assert StateEngine(project).state.device_dirty is True
 
@@ -289,10 +289,10 @@ def test_status_is_idempotent_across_repeated_calls(project):
 
 
 # ------------------------------------------------------------------
-# sync
+# push
 # ------------------------------------------------------------------
 
-def test_sync_pushes_staged_changes_and_updates_baseline(project):
+def test_push_pushes_staged_changes_and_updates_baseline(project):
     _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
 
     mock_conn = MagicMock()
@@ -302,7 +302,7 @@ def test_sync_pushes_staged_changes_and_updates_baseline(project):
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
-        main_module.sync(['-y'])
+        main_module.push(['-y'])
 
     state = StateEngine(project).state
     assert state.host_dirty is False
@@ -318,11 +318,11 @@ def test_sync_pushes_staged_changes_and_updates_baseline(project):
         assert file.read() == ''
 
 
-def test_sync_partial_push_moves_baseline_to_what_actually_landed(project):
+def test_push_partial_push_moves_baseline_to_what_actually_landed(project):
     """
     apply_config aborts on the first rejected command, but the commands
     before it are already on the device. The baseline has to move to match,
-    or `status` reports the landed commands as still-unsynced local edits -
+    or `status` reports the landed commands as still-unpushed local edits -
     which is exactly the misleading state this reconciliation exists to fix.
     """
     _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown', ' bogus-command'])
@@ -338,7 +338,7 @@ def test_sync_partial_push_moves_baseline_to_what_actually_landed(project):
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
         with pytest.raises(SystemExit):
-            main_module.sync(['-y'])
+            main_module.push(['-y'])
 
     # The baseline is now what the device actually has...
     assert git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) == partial_live
@@ -358,7 +358,7 @@ def test_sync_partial_push_moves_baseline_to_what_actually_landed(project):
     assert 'shutdown' not in staged
 
 
-def test_sync_rejected_first_command_leaves_state_intact(project):
+def test_push_rejected_first_command_leaves_state_intact(project):
     """
     The other half of the same path: when nothing landed, the baseline must
     not move and the device must not be marked dirty.
@@ -376,7 +376,7 @@ def test_sync_rejected_first_command_leaves_state_intact(project):
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
         with pytest.raises(SystemExit):
-            main_module.sync(['-y'])
+            main_module.push(['-y'])
 
     state = StateEngine(project).state
     assert state.host_dirty is True
@@ -387,7 +387,7 @@ def test_sync_rejected_first_command_leaves_state_intact(project):
         assert 'bogus-command' in file.read()
 
 
-def test_sync_does_not_roll_back_without_the_flag(project):
+def test_push_does_not_roll_back_without_the_flag(project):
     """
     Undoing a partial push sends more config to a device that just rejected
     some, so it must never happen unasked.
@@ -402,13 +402,13 @@ def test_sync_does_not_roll_back_without_the_flag(project):
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
         with pytest.raises(SystemExit):
-            main_module.sync(['-y'])
+            main_module.push(['-y'])
 
     # Only the original push was attempted - no correction was sent.
     assert mock_conn.send_config_set.call_count == 1
 
 
-def test_sync_rollback_on_error_pushes_device_back_to_pre_sync_baseline(project):
+def test_push_rollback_on_error_pushes_device_back_to_pre_push_baseline(project):
     _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown', ' bogus-command'])
 
     baseline_before = git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath)
@@ -427,7 +427,7 @@ def test_sync_rollback_on_error_pushes_device_back_to_pre_sync_baseline(project)
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
         with pytest.raises(SystemExit):
-            main_module.sync(['-y', '--rollback-on-error'])
+            main_module.push(['-y', '--rollback-on-error'])
 
     # A correction was actually pushed, and it undid the landed command.
     assert mock_conn.send_config_set.call_count == 2
@@ -442,7 +442,7 @@ def test_sync_rollback_on_error_pushes_device_back_to_pre_sync_baseline(project)
     assert StateEngine(project).state.device_dirty is True
 
 
-def test_sync_rollback_on_error_asks_before_pushing_the_correction(project):
+def test_push_rollback_on_error_asks_before_pushing_the_correction(project):
     """
     -y skips the push preview; it must not also silently authorise sending
     a second, corrective batch to a device that is already misbehaving.
@@ -461,33 +461,33 @@ def test_sync_rollback_on_error_asks_before_pushing_the_correction(project):
          patch('builtins.input', side_effect=['y', 'admin', 'n']), \
          patch('getpass.getpass', side_effect=['pw', '']):
         with pytest.raises(SystemExit):
-            main_module.sync(['--rollback-on-error'])
+            main_module.push(['--rollback-on-error'])
 
     # Declining the rollback prompt means no correction is sent.
     assert mock_conn.send_config_set.call_count == 1
 
 
-def test_sync_with_no_edits_does_not_connect(project):
+def test_push_with_no_edits_does_not_connect(project):
     with patch('c2sync.connector.ConnectHandler') as mock_handler:
-        main_module.sync(['-y'])
+        main_module.push(['-y'])
         mock_handler.assert_not_called()
 
 
 # ------------------------------------------------------------------
-# commit
+# save
 # ------------------------------------------------------------------
 
-def test_commit_refuses_while_host_dirty(project):
+def test_save_refuses_while_host_dirty(project):
     _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
     main_module.status([])
 
     with patch('c2sync.connector.ConnectHandler') as mock_handler:
         with pytest.raises(SystemExit):
-            main_module.commit(['-y'])
+            main_module.save(['-y'])
         mock_handler.assert_not_called()
 
 
-def test_commit_saves_and_marks_device_clean(project):
+def test_save_persists_and_marks_device_clean(project):
     StateEngine(project).mark_device_dirty()
 
     mock_conn = MagicMock()
@@ -495,7 +495,7 @@ def test_commit_saves_and_marks_device_clean(project):
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
-        main_module.commit(['-y'])
+        main_module.save(['-y'])
 
     assert StateEngine(project).state.device_dirty is False
 
@@ -540,7 +540,7 @@ def _sync_known_good(project, config_lines):
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
-        main_module.sync(['-y'])
+        main_module.push(['-y'])
 
 
 def test_revert_pushes_diff_between_live_config_and_head_by_default(project):
@@ -660,7 +660,7 @@ def test_revert_prompts_and_aborts_without_dash_y(project):
 
 def test_revert_refuses_when_host_dirty_without_force(project):
     _sync_known_good(project, ['interface Gi1/0/1', ' shutdown'])
-    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown', ' description unsynced'])
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown', ' description unpushed'])
     main_module.status([])
     assert StateEngine(project).state.host_dirty is True
 
@@ -672,12 +672,12 @@ def test_revert_refuses_when_host_dirty_without_force(project):
     # EDIT_FILE must be untouched - refusing must happen before ever
     # connecting or overwriting anything.
     with open(project.EDIT_FILE) as file:
-        assert 'description unsynced' in file.read()
+        assert 'description unpushed' in file.read()
 
 
 def test_revert_overwrites_host_dirty_edits_with_force(project):
     _sync_known_good(project, ['interface Gi1/0/1', ' shutdown'])
-    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown', ' description unsynced'])
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown', ' description unpushed'])
     main_module.status([])
     assert StateEngine(project).state.host_dirty is True
 
@@ -694,13 +694,13 @@ def test_revert_overwrites_host_dirty_edits_with_force(project):
         main_module.revert(['-y', '--force'])
 
     with open(project.EDIT_FILE) as file:
-        assert 'description unsynced' not in file.read()
+        assert 'description unpushed' not in file.read()
     assert StateEngine(project).state.host_dirty is False
 
 
 def test_revert_short_dash_f_also_overwrites_host_dirty_edits(project):
     _sync_known_good(project, ['interface Gi1/0/1', ' shutdown'])
-    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown', ' description unsynced'])
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown', ' description unpushed'])
     main_module.status([])
 
     revert_conn = MagicMock()
@@ -777,7 +777,7 @@ def test_help_prints_usage_to_stdout_and_exits_cleanly(argv, monkeypatch, capsys
     assert captured.err == ''
 
 
-ALL_COMMANDS = ['init', 'pull', 'status', 'sync', 'commit', 'discard', 'revert']
+ALL_COMMANDS = ['init', 'pull', 'status', 'push', 'save', 'discard', 'revert']
 
 
 @pytest.mark.parametrize('command', ALL_COMMANDS)

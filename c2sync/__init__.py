@@ -27,7 +27,7 @@ class Project:
     TIMEOUT: int = 600
     PROJECT_DIR: str = PROJECT_ROOT
     CONFIG_FILE: str = os.path.join(PROJECT_DIR, APP_CONFIG_NAME)
-    # The "baseline" (config as of the last confirmed sync) is no longer a
+    # The "baseline" (config as of the last confirmed push) is no longer a
     # separate file - it's whatever EDIT_FILE looks like at git HEAD in
     # PROJECT_DIR, the same way `git status` diffs against the index.
     EDIT_FILE: str = os.path.join(PROJECT_DIR, DEVICE_CONFIG_NAME)

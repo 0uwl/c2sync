@@ -51,7 +51,7 @@ def commit_content(project_dir: str, path: str, content: str, message: str) -> b
     identical to HEAD's, mirroring commit()'s "nothing changed" contract.
 
     This exists for advancing the baseline to a config the user is *not*
-    editing - specifically `sync`'s partial-push reconciliation, where
+    editing - specifically `push`'s partial-push reconciliation, where
     HEAD must move to what the device actually has while EDIT_FILE keeps
     the user's unpushed edits. Doing that through `git add` would mean
     overwriting EDIT_FILE, committing, then writing the user's content

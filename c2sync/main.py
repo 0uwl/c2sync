@@ -24,10 +24,10 @@ c2sync COMMAND [ARGS]
 Commands:
     init      Start a project for one device in the current directory
     pull      Fetch the device's running config and make it the new baseline
-    status    Show unsynced local edits and unsaved device changes
-    sync      Preview the staged commands and push them to the device
-    commit    Save the device's running config to its startup config
-    discard   Throw away local edits and return to the last confirmed sync
+    status    Show unpushed local edits and unsaved device changes
+    push      Preview the staged commands and push them to the device
+    save      Save the device's running config to its startup config
+    discard   Throw away local edits and return to the last confirmed push
     revert    Push the device's running config back to a past commit
     help      Show this message (also -h, --help)
 
@@ -71,22 +71,22 @@ only creates an empty device.config. It also resyncs the baseline when the
 device was changed outside of C2Sync.
 
 Options:
-  --force, -f  Overwrite unsynced local edits. Without it, pull refuses to
+  --force, -f  Overwrite unpushed local edits. Without it, pull refuses to
                run while you have local edits that would be lost.
 """,
 
     'status': """
 Usage: c2sync status
 
-Show whether there are unsynced local edits or unsaved device changes.
+Show whether there are unpushed local edits or unsaved device changes.
 
 Recomputes the staged commands from device.config against the last confirmed
-sync (device.config at git HEAD), then prints the device state and a preview
+push (device.config at git HEAD), then prints the device state and a preview
 of anything staged. Read-only, and never connects to the device.
 """,
 
-    'sync': """
-Usage: c2sync sync [-y] [--rollback-on-error]
+    'push': """
+Usage: c2sync push [-y] [--rollback-on-error]
 
 Preview the staged commands and push them to the device.
 
@@ -98,7 +98,7 @@ Options:
   -y                    Skip the confirmation prompt.
   --rollback-on-error   If the device rejects a command after earlier ones
                         already applied, offer to undo them by pushing the
-                        device back to the pre-sync baseline.
+                        device back to the pre-push baseline.
 
 A command the device rejects aborts the batch, and the commands before it
 stay on the device. C2Sync always re-reads the running config at that point
@@ -111,10 +111,11 @@ inverse. It previews and asks first unless -y is also given. `c2sync revert`
 is the same recovery driven by hand, and stays available either way.
 """,
 
-    'commit': """
-Usage: c2sync commit [-y]
+    'save': """
+Usage: c2sync save [-y]
 
-Save the device's running config to its startup config.
+Save the device's running config to its startup config (`write memory`), so
+it survives a reload.
 
 Recorded as an empty git commit, since there is no file change to stage for
 this milestone.
@@ -122,7 +123,7 @@ this milestone.
 Options:
   -y  Skip the confirmation prompt.
 
-Refuses to run while you have unsynced local edits, which would save state
+Refuses to run while you have unpushed local edits, which would save state
 you did not intend, and does nothing when the running config is already
 saved.
 """,
@@ -130,10 +131,10 @@ saved.
     'discard': """
 Usage: c2sync discard
 
-Throw away local edits and return to the last confirmed sync.
+Throw away local edits and return to the last confirmed push.
 
 Reverts device.config to its content at git HEAD and clears staging, so the
-discarded edits cannot quietly be re-staged on the next status or sync. Does
+discarded edits cannot quietly be re-staged on the next status or push. Does
 not touch the device.
 """,
 
@@ -149,11 +150,11 @@ gone wrong, neither device.config nor the git baseline is guaranteed to match
 what is actually running.
 
 Arguments:
-  COMMIT  Commit to restore (default: HEAD, the last confirmed sync)
+  COMMIT  Commit to restore (default: HEAD, the last confirmed push)
 
 Options:
   -y           Skip the push confirmation prompt.
-  --force, -f  Overwrite unsynced local edits.
+  --force, -f  Overwrite unpushed local edits.
 
 -y and --force are independent on purpose: -y skips only the preview prompt,
 and --force is the only thing that permits discarding local edits.
@@ -203,10 +204,10 @@ def main():
             pull(command_arguments)
         case 'status':
             status(command_arguments)
-        case 'sync':
-            sync(command_arguments)
-        case 'commit':
-            commit(command_arguments)
+        case 'push':
+            push(command_arguments)
+        case 'save':
+            save(command_arguments)
         case 'discard':
             discard(command_arguments)
         case 'revert':
@@ -253,7 +254,7 @@ def pull(arguments: list):
     baseline can be resynced if the device changed out-of-band.
     """
     LOGGER.debug(f'Given arguments: {arguments}')
-    # pull has no other prompt to skip, so unlike sync/commit/revert there's
+    # pull has no other prompt to skip, so unlike push/save/revert there's
     # no separate -y - --force/-f is the only flag, matching revert's split
     # (a plain "skip prompts" flag must never be the same thing as "yes,
     # overwrite my local edits").
@@ -263,7 +264,7 @@ def pull(arguments: list):
 
     state = StateEngine(project).state
     if state.host_dirty and not force:
-        print('You have unsynced local edits that would be overwritten. Run '
+        print('You have unpushed local edits that would be overwritten. Run '
               '`c2sync discard` first, or `c2sync pull --force` (or `-f`) to overwrite them anyway.')
         sys.exit(1)
 
@@ -290,7 +291,7 @@ def status(arguments: list):
     print(f'Device state: {state.label}')
 
     if lines:
-        print('\nStaged commands (run `c2sync sync` to push):\n')
+        print('\nStaged commands (run `c2sync push` to send them):\n')
         for line in lines:
             print(f'  {line}')
         # label only ever shows one of the two flags (host_dirty wins), but
@@ -299,14 +300,14 @@ def status(arguments: list):
         # behind the staged-command list.
         if state.device_dirty:
             print('\nThe device also has running-config changes not yet saved to '
-                  'startup-config (run `c2sync commit`).')
+                  'startup-config (run `c2sync save`).')
     elif state.device_dirty:
-        print('Running config has not been saved to startup-config yet (run `c2sync commit`).')
+        print('Running config has not been saved to startup-config yet (run `c2sync save`).')
     else:
         print('Nothing staged.')
 
 
-def sync(arguments: list):
+def push(arguments: list):
     LOGGER.debug(f'Given arguments: {arguments}')
     force = '-y' in arguments
     rollback_on_error = '--rollback-on-error' in arguments
@@ -315,7 +316,7 @@ def sync(arguments: list):
     lines = _refresh_staging(project)
 
     if not lines:
-        print('Nothing staged to sync.')
+        print('Nothing staged to push.')
         return
 
     print('The following commands will be sent to the device:\n')
@@ -333,9 +334,9 @@ def sync(arguments: list):
     # to. Reconciliation advances HEAD, so it can't be looked up as 'HEAD'
     # after the fact.
     try:
-        pre_sync_head = git_ops.resolve_rev(project.PROJECT_DIR, 'HEAD')
+        pre_push_head = git_ops.resolve_rev(project.PROJECT_DIR, 'HEAD')
     except git_ops.GitError:
-        pre_sync_head = None
+        pre_push_head = None
 
     with _connected(project) as interface:
         try:
@@ -343,7 +344,7 @@ def sync(arguments: list):
         except ConfigApplyError as e:
             landed = _reconcile_after_failed_push(project, interface, state_engine, e)
             if landed and rollback_on_error:
-                _rollback_after_failed_push(project, interface, state_engine, pre_sync_head, force)
+                _rollback_after_failed_push(project, interface, state_engine, pre_push_head, force)
             # Recompute staging against the baseline reconciliation just
             # moved, so the state left behind is honest about what is still
             # outstanding.
@@ -366,12 +367,12 @@ def sync(arguments: list):
     with open(project.EDIT_FILE, 'w') as file:
         file.write(new_config)
 
-    git_ops.commit(project.PROJECT_DIR, [project.edit_file_relpath], f'c2sync sync: pushed to {project.target}')
+    git_ops.commit(project.PROJECT_DIR, [project.edit_file_relpath], f'c2sync push: pushed to {project.target}')
 
-    print('\nSynced. Device has pending changes not yet saved to startup-config (run `c2sync commit`).')
+    print('\nPushed. Device has pending changes not yet saved to startup-config (run `c2sync save`).')
 
 
-def commit(arguments: list):
+def save(arguments: list):
     LOGGER.debug(f'Given arguments: {arguments}')
     force = '-y' in arguments
 
@@ -380,11 +381,11 @@ def commit(arguments: list):
     state = state_engine.state
 
     if state.host_dirty:
-        print('You have unsynced local edits. Run `c2sync sync` before committing.')
+        print('You have unpushed local edits. Run `c2sync push` before saving.')
         sys.exit(1)
 
     if not state.device_dirty:
-        print('Nothing to commit, running config already matches startup config.')
+        print('Nothing to save, running config already matches startup config.')
         return
 
     if not force and not _confirm('Save running config to startup config?'):
@@ -399,8 +400,8 @@ def commit(arguments: list):
             sys.exit(1)
 
     state_engine.mark_device_clean()
-    git_ops.commit_empty(project.PROJECT_DIR, f'c2sync commit: saved to startup-config on {project.target}')
-    print('\nSaved. Device is now synced.')
+    git_ops.commit_empty(project.PROJECT_DIR, f'c2sync save: saved to startup-config on {project.target}')
+    print('\nSaved. Device is now in sync.')
 
 
 def discard(arguments: list):
@@ -409,7 +410,7 @@ def discard(arguments: list):
     project = _require_project()
 
     # Revert the edit file itself, not just the staging file - otherwise
-    # the discarded edits would just get re-staged the next time status/sync
+    # the discarded edits would just get re-staged the next time status/push
     # recomputes the diff against the baseline.
     baseline = git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) or ''
     with open(project.EDIT_FILE, 'w') as file:
@@ -423,7 +424,7 @@ def discard(arguments: list):
 def revert(arguments: list):
     """
     Push the device's running config back to what it looked like at a past
-    commit (HEAD - the last confirmed sync - by default), for recovering
+    commit (HEAD - the last confirmed push - by default), for recovering
     from a bad push (e.g. one command in a batch got rejected after others
     already landed) without hand-crafting the fix.
 
@@ -449,7 +450,7 @@ def revert(arguments: list):
 
     state = StateEngine(project).state
     if state.host_dirty and not force_overwrite:
-        print('You have unsynced local edits that would be overwritten by revert. Run '
+        print('You have unpushed local edits that would be overwritten by revert. Run '
               '`c2sync discard` first, or `c2sync revert --force` (or `-f`) to overwrite them anyway.')
         sys.exit(1)
 
@@ -491,7 +492,7 @@ def revert(arguments: list):
 
         # The revert push is Netmiko-confirmed at this point. Re-fetch
         # rather than assuming the device now matches target_config
-        # verbatim - same reasoning `sync` already follows after its own
+        # verbatim - same reasoning `push` already follows after its own
         # push.
         new_config = interface.get_running_config()
 
@@ -505,15 +506,15 @@ def revert(arguments: list):
 
     # Whatever was staged before is now stale - EDIT_FILE just got
     # overwritten with the post-revert device state. host_dirty/device_dirty
-    # follow the same transitions as a successful sync: local edits are (no
+    # follow the same transitions as a successful push: local edits are (no
     # longer) a concept here, and running-config now differs from
-    # startup-config again until `c2sync commit`.
+    # startup-config again until `c2sync save`.
     Differ(project).clear_staging()
     state_engine = StateEngine(project)
     state_engine.mark_host_clean()
     state_engine.mark_device_dirty()
 
-    print('\nReverted. Device has pending changes not yet saved to startup-config (run `c2sync commit`).')
+    print('\nReverted. Device has pending changes not yet saved to startup-config (run `c2sync save`).')
 
 
 def _reconcile_after_failed_push(project: Project, interface, state_engine: StateEngine, error) -> bool:
@@ -523,7 +524,7 @@ def _reconcile_after_failed_push(project: Project, interface, state_engine: Stat
     apply_config aborts the batch on the first rejected command, but the
     commands before it are already running on the device. Without this the
     baseline still describes the pre-push device, so `status` reports
-    everything - landed and unlanded alike - as unsynced local edits.
+    everything - landed and unlanded alike - as unpushed local edits.
 
     Re-fetches the running config and commits it as the new baseline,
     deliberately leaving EDIT_FILE alone: the user's unpushed edits are
@@ -549,7 +550,7 @@ def _reconcile_after_failed_push(project: Project, interface, state_engine: Stat
 
     landed = git_ops.commit_content(
         project.PROJECT_DIR, project.edit_file_relpath, live_config,
-        f'c2sync sync: partial push to {project.target} (device rejected a command)',
+        f'c2sync push: partially applied to {project.target} (device rejected a command)',
     )
 
     if landed:
@@ -569,8 +570,8 @@ def _rollback_after_failed_push(
     project: Project, interface, state_engine: StateEngine, to_rev: str, skip_confirm: bool,
 ) -> bool:
     """
-    Opt-in (`sync --rollback-on-error`) undo of a partial push: diff the
-    live device against the baseline the sync started from and push the
+    Opt-in (`push --rollback-on-error`) undo of a partial push: diff the
+    live device against the baseline the push started from and push the
     correction, the same thing `c2sync revert` does by hand.
 
     Off by default on purpose. Undoing a partial push means sending *more*
@@ -595,7 +596,7 @@ def _rollback_after_failed_push(
 
     lines = Differ.diff_lines(live_config, target_config)
     if not lines:
-        print('\nNothing to roll back - the device already matches the pre-sync baseline.')
+        print('\nNothing to roll back - the device already matches the pre-push baseline.')
         return False
 
     print(f'\nRolling back to {to_rev[:8]} - the following commands will be sent to the device:\n')
@@ -614,17 +615,17 @@ def _rollback_after_failed_push(
         return False
 
     # Re-read rather than assuming the device now matches target_config
-    # verbatim, the same way sync and revert do after their own pushes.
+    # verbatim, the same way push and revert do after their own pushes.
     rolled_back_config = interface.get_running_config()
     git_ops.commit_content(
         project.PROJECT_DIR, project.edit_file_relpath, rolled_back_config,
-        f'c2sync sync: rolled back partial push to {project.target}',
+        f'c2sync push: rolled back partial push to {project.target}',
     )
     # running-config was written twice (partial push, then the undo), so it
     # is not safe to claim it matches startup-config again.
     state_engine.mark_device_dirty()
     print('\nRolled back. Your edits in the config file were left untouched - fix the\n'
-          'rejected command and run `c2sync sync` again.')
+          'rejected command and run `c2sync push` again.')
     return True
 
 

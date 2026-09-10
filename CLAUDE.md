@@ -38,8 +38,8 @@ c2sync init /dev/ttyUSB0 [BAUDRATE]     # serial transport
 c2sync init --ssh HOST [PORT]           # SSH transport
 c2sync pull [--force|-f]
 c2sync status
-c2sync sync [-y] [--rollback-on-error]
-c2sync commit [-y]
+c2sync push [-y] [--rollback-on-error]
+c2sync save [-y]
 c2sync discard
 c2sync revert [COMMIT] [-y] [--force|-f]   # COMMIT defaults to HEAD
 
@@ -97,7 +97,7 @@ relative to cwd — commands must be run from the project directory.
 | `c2sync/user_config.py` | Reads the optional global TOML preferences file — `load()`/`config_path()` |
 | `c2sync/state_engine.py` | `StateEngine` — `host_dirty`/`device_dirty` tracking |
 | `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigSaveError`, `HostKeyRejectedError` |
-| `c2sync/main.py` | CLI entry point: `init` / `pull` / `status` / `sync` / `commit` / `discard` / `revert` |
+| `c2sync/main.py` | CLI entry point: `init` / `pull` / `status` / `push` / `save` / `discard` / `revert` |
 
 ### Diff → CLI command translation (`differ.py`)
 
@@ -126,7 +126,7 @@ with both the negation and the addition grouped under it.
 
 There is deliberately no file-watcher process. Change detection mirrors how `git
 status`/`git diff` work — literally now, not just by analogy: `Differ.
-refresh_staging_from_files()` (called at the top of both `status` and `sync` in
+refresh_staging_from_files()` (called at the top of both `status` and `push` in
 `main.py`) reads the baseline via `git_ops.show_at_head()` (`git show HEAD:device.
 config` under the hood) and `EDIT_FILE` fresh every time, recomputes `STAGING_FILE`
 from scratch, and returns whether anything is staged. There's no mtime/stat fast-path
@@ -138,9 +138,9 @@ diff (plus one `git show` subprocess call) on every check is already cheap.
 Two independent booleans, not a single enum — this matters because a discard should be
 able to clear `host_dirty` without touching `device_dirty`, and vice versa:
 
-- `host_dirty` — `EDIT_FILE` differs from `device.config` at git `HEAD` (unsynced local
+- `host_dirty` — `EDIT_FILE` differs from `device.config` at git `HEAD` (unpushed local
   edits).
-- `device_dirty` — a sync has been pushed and confirmed, but not yet saved to
+- `device_dirty` — a push has been sent and confirmed, but not yet saved to
   startup-config.
 
 `StateEngine.state.label` computes a single display string (`host pending changes` >
@@ -208,17 +208,17 @@ Two things this wrapper adds on top of raw Netmiko, transport-independent:
 - `save_config()` checks the device's response for IOS's `[OK]` marker before
   returning, raising `ConfigSaveError` if the save wasn't actually confirmed.
 
-`main.py`'s `sync`/`commit` only advance state (clear staging, mark `device_dirty`,
+`main.py`'s `push`/`save` only advance state (clear staging, mark `device_dirty`,
 commit the new baseline to git, mark `device_dirty` clean) after these confirmed
 returns — never optimistically.
 
-### Partial-push reconciliation (`sync`'s error path)
+### Partial-push reconciliation (`push`'s error path)
 
 `apply_config` aborts the batch on the first rejected command, but the commands
-*before* it are already running on the device. Previously `sync` caught
+*before* it are already running on the device. Previously `push` caught
 `ConfigApplyError`, printed "nothing was applied" (which was simply false), and exited
 without touching state — so the baseline still described the pre-push device and
-`status` reported the landed commands as unsynced local edits. That is the bug this
+`status` reported the landed commands as unpushed local edits. That is the bug this
 path exists to fix.
 
 **Always, unconditionally:** `_reconcile_after_failed_push()` re-reads the running
@@ -233,8 +233,8 @@ the device and writes locally, which is what makes it safe to do automatically; 
 re-read itself fails, it says so and tells the user to `pull --force` rather than
 leaving them with silently wrong state.
 
-**Opt-in, via `sync --rollback-on-error`:** `_rollback_after_failed_push()` diffs the
-live device against the baseline the sync *started* from (captured as `pre_sync_head`
+**Opt-in, via `push --rollback-on-error`:** `_rollback_after_failed_push()` diffs the
+live device against the baseline the push *started* from (captured as `pre_push_head`
 before the push, since reconciliation moves `HEAD`) and pushes the correction — the same
 thing `revert` does by hand. It previews and confirms unless `-y`.
 
@@ -258,7 +258,23 @@ be invisible.
 
 ### CLI surface (`main.py`)
 
-Actual commands: `init`, `pull`, `status`, `sync`, `commit`, `discard`, `revert`. `pull`
+**On the command names.** `push`/`save` were `sync`/`commit` until the rename, and the
+pairing is deliberate. `pull`/`push` are symmetric transfer verbs, and `push` states the
+direction and consequence that `sync` obscured — this is a one-way write to production
+network gear, not a two-way reconciliation.
+
+`save` matters more than `push` did. c2sync is otherwise modeled on git, but this one
+command is **not** git's `commit`: it issues `write memory` on the device, persisting
+config across a reload. Worse, the ordering is inverted from git's — git is `commit`
+then `push`, c2sync is `push` then `save`. Naming it `commit` therefore invited reading
+an irreversible device operation as git's cheap, local, reversible one, at the exact
+point where the git analogy stops holding. `save` is also the vocabulary IOS operators
+already use (`write mem`, `copy run start`). Keep these names out of git's verb space
+even though the rest of the tool leans into it — and note `save` still records an empty
+git commit via `git_ops.commit_empty()`, so "commit" survives as an implementation
+detail, not as the user-facing verb.
+
+Actual commands: `init`, `pull`, `status`, `push`, `save`, `discard`, `revert`. `pull`
 connects, fetches `show running-config brief`, writes it to `EDIT_FILE`, and commits it
 — this is how an already-configured device gets onboarded (`init` alone only creates an
 empty `device.config`), and it doubles as a way to resync the baseline if the device
@@ -268,10 +284,10 @@ confirmation at all, since there's nothing local to lose. `pull` has no `-y` —
 other prompt to skip, so (like `revert`, see below) the overwrite-approval flag is
 `--force`/`-f` specifically, never a generic "don't ask me anything" flag. `status` is read-only
 (recomputes staging, prints state + preview, never connects to the device — this is the
-`git status` analog). `sync` pushes, then re-fetches `show running-config brief`,
+`git status` analog). `push` sends the staged commands, then re-fetches `show running-config brief`,
 writes it to `EDIT_FILE`, and makes a real git commit in `PROJECT_DIR` (`git_ops.
 commit()`) — advancing `HEAD` *is* advancing the baseline now. When the push is rejected
-partway it does *not* just bail: see Partial-push reconciliation above. `commit` refuses to run
+partway it does *not* just bail: see Partial-push reconciliation above. `save` refuses to run
 while `host_dirty` (would save unintended state to startup-config), saves
 running→startup only when `device_dirty`, and records that milestone as an empty git
 commit (`git_ops.commit_empty()`) since there's no file content to stage for it.
@@ -286,13 +302,13 @@ GitHub/GitLab for review.
 
 `revert [COMMIT] [-y] [--force|-f]` is the manual recovery path for a bad push (e.g. a
 batch where command 3 of 8 got rejected after 1-2 already landed) — see Known
-constraints. `COMMIT` defaults to `HEAD` (the last confirmed sync). Unlike every other
+constraints. `COMMIT` defaults to `HEAD` (the last confirmed push). Unlike every other
 command here, it diffs against a config fetched **fresh from the device right now**,
 not `EDIT_FILE` — after something's gone wrong, neither `EDIT_FILE` nor the git
 baseline is guaranteed to reflect what's actually running, only the device itself is.
 Refuses to run while `host_dirty` unless `--force`/`-f` is passed — reverting
 overwrites `EDIT_FILE` with the post-revert device state, which would otherwise
-silently discard unsynced local edits. `-y` and `--force` are deliberately independent
+silently discard unpushed local edits. `-y` and `--force` are deliberately independent
 flags: `-y` only skips the push-preview confirmation, `--force` is the only thing that
 permits overwriting `host_dirty` edits — a user reaching for `-y` just to skip the
 prompt shouldn't be able to lose local work as a side effect they didn't ask for.
@@ -302,13 +318,13 @@ target, which would try to strip the entire device config), `git_ops.show_at()` 
 commit's `device.config` (deliberately not the soft-fallback `show_at_head()` — a bad
 rev here must be a hard error too), connect and fetch the live running-config,
 `Differ.diff_lines(live, target)`, preview and confirm (or `-y`), `apply_config()`. On
-success it re-fetches and writes `EDIT_FILE`, same as `sync`. Modeled on `git revert`,
+success it re-fetches and writes `EDIT_FILE`, same as `push`. Modeled on `git revert`,
 not `git reset --hard`: it makes a **new** commit recording the recovered state rather
 than rewinding `HEAD`, so the incident stays visible in `git log` (and is a no-op
 commit when the recovered content already matches `HEAD`, exactly like
-`git_ops.commit()`'s existing "nothing changed" short-circuit that `sync`/`pull`
+`git_ops.commit()`'s existing "nothing changed" short-circuit that `push`/`pull`
 already rely on). `host_dirty`/`device_dirty` transition the same way a successful
-`sync` does.
+`push` does.
 
 `main()` handles help before dispatching, via `_print_help()` and the `COMMAND_HELP`
 dict (one entry per command, holding its own usage line, arguments, flags and the
@@ -332,7 +348,7 @@ suite instead of silently falling back to `USAGE`. The top-level `USAGE` is deli
 line per command with no flags — arguments and flags live only in `COMMAND_HELP`, so
 there is a single place to edit when they change.
 
-`pull`, `sync`, `commit`, and `revert` all connect through `_connected()`, a
+`pull`, `push`, `save`, and `revert` all connect through `_connected()`, a
 `@contextmanager` wrapping `_connect()` in `try`/`finally` so `interface.disconnect()`
 always runs — including when a call inside the block raises (a rejected push, a
 dropped session mid-fetch) or the function returns early — rather than every command
@@ -351,9 +367,9 @@ half-prompts or hangs on stdin in CI. `C2SYNC_SECRET` is checked the same way as
 `C2SYNC_PASSWORD` but is optional either way (`None` if unset, prompted for otherwise).
 Passwords/enable-secrets are **never** read from the global config file or stored
 anywhere by c2sync itself — env vars are meant to be injected by the CI system's own
-secrets manager. Combined with `sync -y`/`commit -y` (skips the confirmation prompt
+secrets manager. Combined with `push -y`/`save -y` (skips the confirmation prompt
 too), this is what unblocks the PR-merge-triggers-apply workflow: a CI job that runs
-`c2sync sync -y` against the device once a config change is reviewed and merged, which
+`c2sync push -y` against the device once a config change is reviewed and merged, which
 is the actual payoff of tracking device config in git rather than just having a
 prettier editing loop. Note this is about a *user's* config repo (a `PROJECT_DIR`
 created by `c2sync init`), not this repo's own CI/CD.
@@ -510,8 +526,8 @@ job does not need it, since it passes `--skip-tests`.
   family (`cisco_ios_serial` on the serial branch — see Device transport above), and
   `Diff(..., syntax='ios')` is hardcoded in `differ.py`.
 - Rolling back a partial push (command N of a batch rejected after N-1 landed) is
-  **opt-in**, not automatic: `apply_config` aborts the batch, and `sync` always
-  reconciles local state to what actually landed but does not undo it. `sync
+  **opt-in**, not automatic: `apply_config` aborts the batch, and `push` always
+  reconciles local state to what actually landed but does not undo it. `push
   --rollback-on-error` and `c2sync revert` are the two recovery paths — see
   Partial-push reconciliation below for why undoing is not the default.
 - No file locking on `state.json`/`staging.txt` — fine for one interactive CLI
@@ -525,8 +541,8 @@ job does not need it, since it passes `--skip-tests`.
 Priority order, user-approved. All three have landed:
 
 1. **Real git integration — done.** `init_project` runs `git init -b main` in
-   `PROJECT_DIR` and commits the initial empty `device.config`; `sync` commits the
-   newly-pulled running-config after a confirmed push; `commit` (startup-config save)
+   `PROJECT_DIR` and commits the initial empty `device.config`; `push` commits the
+   newly-pulled running-config after a confirmed push; `save` (startup-config save)
    records an empty commit since there's no file diff for that event. `BASELINE_FILE`
    is gone — the baseline is `device.config` at git `HEAD`, read via `git_ops.
    show_at_head()`. Still a **thin wrapper**: `c2sync` does not reimplement

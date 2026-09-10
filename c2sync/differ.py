@@ -64,7 +64,7 @@ class Differ:
     def refresh_staging_from_files(self) -> bool:
         """
         Same as refresh_staging, but reads the baseline from git HEAD (the
-        last confirmed sync) and the current config from the project's
+        last confirmed push) and the current config from the project's
         EDIT_FILE.
         """
         edit_file_name = os.path.relpath(self.project.EDIT_FILE, self.project.PROJECT_DIR)
