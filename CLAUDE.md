@@ -60,7 +60,8 @@ files, not a package import.
 
 `c2sync init SERIAL_DEVICE [BAUDRATE]` (serial) or `c2sync init --ssh HOST [PORT]`
 (SSH) creates `./.c2sync/` holding the entire state for **one device** — there is
-currently no multi-device registry (see the explicit non-goal in `HANDOFF.md`):
+currently no multi-device registry, which is an explicit non-goal rather than a gap
+(see Explicit non-goals below):
 
 - `device.config` (`EDIT_FILE`) — what the user edits in their text editor. Tracked in
   a real git repo (`git init` inside `PROJECT_DIR` at `init` time) — the baseline is no
@@ -291,8 +292,11 @@ half-prompts or hangs on stdin in CI. `C2SYNC_SECRET` is checked the same way as
 Passwords/enable-secrets are **never** read from the global config file or stored
 anywhere by c2sync itself — env vars are meant to be injected by the CI system's own
 secrets manager. Combined with `sync -y`/`commit -y` (skips the confirmation prompt
-too), this is what unblocks the PR-merge-triggers-apply workflow from `HANDOFF.md`'s
-roadmap.
+too), this is what unblocks the PR-merge-triggers-apply workflow: a CI job that runs
+`c2sync sync -y` against the device once a config change is reviewed and merged, which
+is the actual payoff of tracking device config in git rather than just having a
+prettier editing loop. Note this is about a *user's* config repo (a `PROJECT_DIR`
+created by `c2sync init`), not this repo's own CI/CD.
 
 A `docker login`-style persistent credential store (i.e. one that also holds the
 password) was considered and explicitly declined: `docker login`'s own default storage
@@ -457,7 +461,7 @@ job does not need it, since it passes `--skip-tests`.
 
 ## Roadmap and active design decisions
 
-See `HANDOFF.md` for the full write-up. Priority order, user-approved:
+Priority order, user-approved. All three have landed:
 
 1. **Real git integration — done.** `init_project` runs `git init -b main` in
    `PROJECT_DIR` and commits the initial empty `device.config`; `sync` commits the
@@ -492,6 +496,22 @@ See `HANDOFF.md` for the full write-up. Priority order, user-approved:
    `c2sync init SERIAL_DEVICE [BAUDRATE]`. `differ.py`/`state_engine.py`/the rest of
    `main.py` needed zero changes, confirming they really were transport-agnostic already
    (they operate on `Project` and CLI text, never on `DeviceInterface` internals).
+
+### Explicit non-goals
+
+Decisions to *not* build something, recorded so they don't get re-litigated or
+half-implemented as a side effect of other work:
+
+- **Multi-device registry.** One project directory is one device. Earlier drafts of
+  `README.md` described a registry; that was documentation drift, not a plan. Don't
+  build it until it is deliberately prioritized — either build it properly or leave the
+  docs matching the code, but never half-do it while working on something else.
+- **Multi-vendor support.** Cisco IOS only, by design (see Known constraints above and
+  `README.md`'s "Potential Future Features").
+- **Dry-run against a simulator.** A real safety gap — nothing catches a command that is
+  syntactically valid but operationally destructive, such as shutting the interface the
+  session rides on — but deliberately out of scope. `c2sync revert` is the recovery path
+  instead of prevention.
 
 ## Docs drift to be aware of
 
