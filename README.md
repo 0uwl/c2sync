@@ -36,13 +36,18 @@ Not published to PyPI or any distro repository yet. There are two ways in.
 
 ### From a release archive (Linux)
 
-`build.sh` produces a single `.tar.gz` holding a wheel for c2sync, wheels for every
-runtime dependency, and an installer. Nothing is fetched from the network at install
+Download the archive for your architecture from the
+[releases page](https://github.com/0uwl/c2sync/releases), along with `SHA256SUMS.txt`
+if you want to verify it (`sha256sum -c SHA256SUMS.txt`). Releases are built and
+install-tested by CI, never uploaded by hand.
+
+The archive holds a wheel for c2sync, wheels for every runtime dependency, and an
+installer. Nothing is fetched from the network at install
 time, which matters for the isolated management networks these devices usually sit on.
 
 ```bash
-tar -xzf c2sync-0.1.0.tar.gz
-./c2sync-0.1.0/install.sh
+tar -xzf c2sync-0.1.0-linux-x86_64.tar.gz
+./c2sync-0.1.0-linux-x86_64/install.sh
 ```
 
 This installs entirely under your home directory and **never needs root**:
@@ -58,7 +63,7 @@ invokes `sudo` or a package manager on your behalf. It also verifies the bundled
 wheels against `SHA256SUMS` before installing. If `~/.local/bin` isn't on your `PATH`
 it will say so and tell you how to add it.
 
-To remove it, run `./c2sync-0.1.0/uninstall.sh` (`-y` to skip the prompt). It deletes
+To remove it, run `./c2sync-0.1.0-linux-x86_64/uninstall.sh` (`-y` to skip the prompt). It deletes
 only the two paths above — your project directories and their git history are left
 alone.
 
@@ -75,7 +80,7 @@ below) and a real or mocked device connection for anything beyond `init`/`status
 ## Building a release archive
 
 ```bash
-./build.sh                    # test, build, and write dist/c2sync-<version>.tar.gz
+./build.sh                    # test, build, write dist/c2sync-<version>-linux-<arch>.tar.gz
 ./build.sh --skip-tests       # skip the test suite
 ./build.sh --test-install     # additionally install the result in clean containers
 ```
@@ -99,6 +104,41 @@ Two constraints worth knowing:
 `--test-install` builds a container per supported Python version, installs the archive
 as a non-root user, and checks that the command runs and the package imports — a
 missing transitive wheel only surfaces at import time, not at launch.
+
+## Continuous integration
+
+Two workflows, both on `ubuntu-24.04`.
+
+**CI** (`.github/workflows/ci.yml`) runs on pull requests to `main` and on pushes to
+`main`:
+
+* the test suite against Python 3.11, 3.12 and 3.13
+* `shellcheck` over `build.sh`, `install.sh` and `uninstall.sh`
+* a full `./build.sh --skip-tests --test-install`, which builds the archive and installs
+  it in a clean container per supported Python version
+
+The built archive is uploaded as a workflow artifact, so a PR build can be downloaded
+and tried by hand before merging.
+
+**Release** (`.github/workflows/release.yml`) runs when a GitHub release is published.
+It rebuilds the archive from scratch *with* tests, checksums it, and attaches the
+archive and `SHA256SUMS.txt` to the release. Two things have to hold or the release
+fails:
+
+* the tagged commit is contained in `main`
+* the tag matches the version in `pyproject.toml` (`v0.2.0` ↔ `version = "0.2.0"`)
+
+The second one matters because `build.sh` names the artifact from `pyproject.toml` and
+knows nothing about the tag, so without the check, releasing `v0.2.0` while
+`pyproject.toml` still said `0.1.0` would quietly attach `c2sync-0.1.0-*` to it.
+
+**To cut a release:** bump `version` in `pyproject.toml` on `main` first, then create a
+GitHub release whose tag matches.
+
+The runner is pinned rather than `ubuntu-latest` on purpose: manylinux wheel selection
+depends on the build host's glibc, so the runner image sets the glibc floor of every
+published archive. Pinning keeps that a deliberate change instead of one GitHub makes
+for you.
 
 ## Usage
 ### CLI Commands

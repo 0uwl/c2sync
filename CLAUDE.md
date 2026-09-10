@@ -333,7 +333,9 @@ but broken config is very likely a real mistake worth surfacing.
 ### Build and distribution (`build.sh` / `install.sh` / `uninstall.sh`)
 
 Linux only, and deliberately just an archive plus an install script — no `.deb`/`.rpm`
-/AUR packaging, no PyPI publish. `build.sh` writes `dist/c2sync-<version>.tar.gz`
+/AUR packaging, no PyPI publish. `build.sh` writes
+`dist/c2sync-<version>-linux-<arch>.tar.gz` (arch from `uname -m`; naming it now means
+adding a second arch later is additive rather than a rename of published assets)
 containing `wheels/` (a wheel for c2sync plus every runtime dependency), `install.sh`,
 `uninstall.sh`, `VERSION`, `PYTHON_VERSIONS`, and `SHA256SUMS`. Install does no network
 I/O at all, which is the point — these devices usually sit on isolated management
@@ -395,6 +397,48 @@ Project directories are never touched.
 the built archive as a non-root user, once per supported Python version. It checks both
 that `c2sync --help` runs and that `c2sync.main`/`connector`/`differ`/`git_ops` import
 — a missing transitive wheel only surfaces at import time, not at `--help`.
+
+### CI/CD (`.github/workflows/`)
+
+Two workflows, both pinned to `ubuntu-24.04` rather than `ubuntu-latest`. That pin is
+load-bearing: manylinux wheel selection depends on the build host's glibc, so the runner
+image sets the glibc floor of every published archive — on `ubuntu-latest`, GitHub
+rolling the image forward could raise that floor and break installs on older targets
+with no change in this repo. **The two workflows must stay pinned to the same image**,
+or releases get built on a different base than CI tested on.
+
+`ci.yml` — on `pull_request` to `main` and `push` to `main`. Three jobs: `test` (the
+suite across Python 3.11/3.12/3.13), `shellcheck` (`build.sh`/`install.sh`/
+`uninstall.sh`; shellcheck is preinstalled on GitHub runners, so this adds no repo
+config — it is not a general lint setup, and the "no lint/format tooling" note above
+still holds for Python), and `package` (`./build.sh --skip-tests --test-install`, which
+needs `test` and `shellcheck` to pass first). `--skip-tests` because `test` already ran
+the suite on every supported interpreter. The matrix **must stay in step with
+`PY_VERSIONS` in `build.sh`** — they are the same claim about which interpreters are
+supported, expressed twice.
+
+`release.yml` — on `release: published` (not `created`, which also fires for drafts, nor
+`released`, which skips prereleases). It runs `./build.sh --test-install` **with** tests
+(an artifact that reaches users is never built from an untested tree), writes an outer
+`SHA256SUMS.txt` covering the tarball itself — the `SHA256SUMS` *inside* the archive
+covers the bundled wheels and so cannot verify the download — and attaches both with
+`gh release upload --clobber`. `contents: write` is scoped to that one job; the rest is
+`contents: read`.
+
+Two guards run before the build, and both are there for concrete failure modes:
+
+- **The tagged commit must be contained in `main`.** GitHub lets a release be created
+  from any branch or arbitrary tag, so without this a release cut from a feature branch
+  publishes as though it were a main build.
+- **The tag must match `pyproject.toml`'s version** (`v0.2.0` ↔ `0.2.0`). `build.sh`
+  names the artifact from `pyproject.toml` and knows nothing about the git tag, so
+  releasing `v0.2.0` while the file still said `0.1.0` would silently attach
+  `c2sync-0.1.0-linux-x86_64.tar.gz` to the `v0.2.0` release. Cutting a release
+  therefore means bumping `pyproject.toml` on `main` first.
+
+`release.yml` installs `.[dev]` before building because `--test-install` runs the suite;
+without it `build.sh`'s `resolve_pytest` finds nothing and aborts. `ci.yml`'s `package`
+job does not need it, since it passes `--skip-tests`.
 
 ## Known constraints / simplifications
 

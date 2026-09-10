@@ -80,7 +80,11 @@ PYEOF
 )
 [ -n "${VERSION}" ] || die "Could not read [project].version from pyproject.toml"
 
-DIST_NAME="c2sync-${VERSION}"
+# The archive is built for the build host's architecture (see the --platform
+# note below), so the name says which. Naming it now means adding another arch
+# later is additive rather than a rename of already-published assets.
+ARCH="$(uname -m)"
+DIST_NAME="c2sync-${VERSION}-linux-${ARCH}"
 BUILD_DIR=$(mktemp -d)
 STAGE="${BUILD_DIR}/${DIST_NAME}"
 
@@ -154,7 +158,8 @@ mkdir -p "${SCRIPT_DIR}/dist"
 OUTPUT="${SCRIPT_DIR}/dist/${DIST_NAME}.tar.gz"
 tar -czf "${OUTPUT}" -C "${BUILD_DIR}" "${DIST_NAME}"
 
-echo "Created dist/${DIST_NAME}.tar.gz ($(du -h "${OUTPUT}" | cut -f1), $(ls "${STAGE}/wheels" | wc -l) wheels)"
+WHEEL_COUNT=$(find "${STAGE}/wheels" -name '*.whl' | wc -l)
+echo "Created dist/${DIST_NAME}.tar.gz ($(du -h "${OUTPUT}" | cut -f1), ${WHEEL_COUNT} wheels)"
 
 if [ "${TEST_INSTALL}" -eq 1 ]; then
     command -v docker &>/dev/null || die "--test-install requires docker."

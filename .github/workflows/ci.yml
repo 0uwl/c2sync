@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# A new push to a PR makes the in-flight run obsolete. main is not cancelled:
+# every commit that lands there should have a completed run of its own.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    # Pinned rather than ubuntu-latest: manylinux wheel selection depends on the
+    # build host's glibc, so the runner image silently sets the glibc floor of
+    # everything this repo publishes. Keep this in step with release.yml.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Must stay in step with PY_VERSIONS in build.sh: these are the
+        # interpreters the release archive vendors wheels for.
+        python-version: ['3.11', '3.12', '3.13']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      - name: Run tests
+        run: python -m pytest c2sync/tests -q
+
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Preinstalled on GitHub runners, so this needs no setup and adds no
+      # config file to the repo.
+      - name: Lint shell scripts
+        run: shellcheck build.sh install.sh uninstall.sh
+
+  package:
+    name: Build and install-test the archive
+    runs-on: ubuntu-24.04
+    # Building the archive takes minutes; there is no point spending them on a
+    # commit whose tests already failed.
+    needs: [test, shellcheck]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # --skip-tests because the test job above already ran the suite across
+      # every supported interpreter. --test-install installs the built archive
+      # in a clean container per supported Python version and checks that the
+      # command runs and the package imports.
+      - name: Build and install-test
+        run: ./build.sh --skip-tests --test-install
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: c2sync-archive
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
