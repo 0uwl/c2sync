@@ -15,6 +15,44 @@ current work.
 There is no lint/format tooling configured in this repo (no ruff/black/flake8 config)
 — don't invent one.
 
+## Git as the mental model
+
+C2Sync treats the device as a remote repository to push and pull its configuration
+from. Every design decision here should run through one test: **what would git do at
+this point?** That isn't decoration — it's the governing principle behind most of what's
+already built, even in places where it was never written down as a rule until now:
+
+- **Verb choice.** `push`/`pull` are named for git's own transfer verbs specifically
+  because the earlier `sync`/`commit` naming obscured that `push` is a one-way write to
+  production network gear, not a two-way reconciliation (see CLI surface below). `save`
+  is deliberately kept *outside* git's verb space for the opposite reason — it isn't
+  git's `commit` (an irreversible `write memory`, not a cheap local operation), and
+  reusing that name would invite the wrong assumption at exactly the point the analogy
+  stops holding.
+- **Push safety.** The out-of-band drift check (see below) is framed and built as
+  `git push` without a fetch: read the remote's current state first, and refuse to push
+  over a target that's moved, rather than trusting a stale local diff.
+- **Recovery.** `revert` is modeled on `git revert` (a new commit undoing prior state),
+  not `git reset --hard` (rewinding history), specifically so a bad push stays visible
+  in `git log` instead of being erased.
+- **Refusing silent loss.** `pull`/`revert` both refuse to overwrite unpushed local
+  edits unless explicitly forced — the same instinct behind git refusing a
+  non-fast-forward `pull` rather than silently discarding local commits.
+
+**Where this stops:** the device is not a git remote, and c2sync should not try to make
+it one. Git's model assumes structured objects, history, and merges on both ends; a
+device has none of that — it's one flat, live state that either accepts a batch of CLI
+commands or rejects them. A literal git-remote-helper (so a user could `git push device
+main` directly) would mean reimplementing a real transport protocol to bridge two
+genuinely mismatched models, and would bury the parts that actually matter — verified
+command application, drift detection, `ciscoconfparse2`-generated negations — inside
+protocol plumbing instead of the plain Python functions they are today. The metaphor
+operates at the level of naming and behavior — what would git do at this decision point
+— not the wire protocol.
+
+Run new command or behavior decisions through this test before reaching for a bespoke
+design.
+
 ## Commands
 
 Requires Python >=3.11 (for stdlib `tomllib`, used to read the global config file).
