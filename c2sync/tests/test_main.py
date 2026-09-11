@@ -223,13 +223,13 @@ def test_init_creates_a_name_derived_subdirectory_by_default(tmp_path, monkeypat
 
     project_dir = tmp_path / 'myrouter'
     assert project_dir.is_dir()
-    # device.config, .gitignore and .git are all visible at the top level -
-    # the whole point of this layout - while the operational scratch files
-    # are tucked away in .c2sync/.
+    # device.config, .gitignore, .git and c2sync.toml are all visible at the
+    # top level and git-tracked - the whole point of this layout - while
+    # only the operational scratch files are tucked away in .c2sync/.
     assert (project_dir / 'device.config').is_file()
     assert (project_dir / '.gitignore').is_file()
     assert (project_dir / '.git').is_dir()
-    assert (project_dir / '.c2sync' / 'c2sync.config').is_file()
+    assert (project_dir / 'c2sync.toml').is_file()
     assert (project_dir / '.c2sync' / 'staging.txt').is_file()
     assert (project_dir / '.c2sync' / 'state.json').is_file()
 
@@ -259,6 +259,46 @@ def test_init_refuses_to_overwrite_an_existing_project(tmp_path, monkeypatch):
     # The existing project's edits must survive the refused re-init.
     with open('device.config') as file:
         assert file.read() == 'interface Gi1/0/1\n'
+
+
+def test_init_pull_flag_onboards_an_existing_device_in_one_step(tmp_path, monkeypatch):
+    """
+    --pull mirrors `git clone`: the device is already configured, so
+    onboarding it is `init` immediately followed by a `pull`, done here in
+    one step instead of two.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_command.return_value = 'hostname Router1\ninterface Gi1/0/1\n'
+
+    with patch('c2sync.connector.ConnectHandler', return_value=mock_conn), \
+         patch('builtins.input', side_effect=['admin']), \
+         patch('getpass.getpass', side_effect=['pw', '']):
+        main_module.init(['myrouter', '/dev/ttyUSB0', '--dir', '.', '--pull'])
+
+    with open('device.config') as file:
+        assert file.read() == 'hostname Router1\ninterface Gi1/0/1\n'
+
+    project = get_project()
+    assert StateEngine(project).state.host_dirty is False
+    # The pulled config is the git baseline already - a bare device.config
+    # from `init` alone would still be an empty-string baseline instead.
+    assert git_ops.show_at_head(project.PROJECT_DIR, 'device.config') == 'hostname Router1\ninterface Gi1/0/1\n'
+
+
+def test_init_without_pull_flag_still_creates_an_empty_baseline(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
+
+    with patch('c2sync.connector.ConnectHandler') as mock_handler:
+        main_module.init(['myrouter', '/dev/ttyUSB0', '--dir', '.'])
+        mock_handler.assert_not_called()
+
+    with open('device.config') as file:
+        assert file.read() == ''
 
 
 def test_project_name_is_stored_and_reloaded(tmp_path, monkeypatch):
@@ -352,6 +392,59 @@ def test_pull_short_dash_f_also_overwrites_host_dirty_edits(project):
     with patches[0], patches[1], patches[2]:
         main_module.pull(['-f'])
 
+    assert StateEngine(project).state.host_dirty is False
+
+
+# ------------------------------------------------------------------
+# fetch
+# ------------------------------------------------------------------
+
+def test_fetch_reports_no_drift_when_device_matches_baseline(project, capsys):
+    _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_command.return_value = 'interface Gi1/0/1\n description Server\n'
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.fetch([])
+
+    output = capsys.readouterr().out
+    assert 'No drift' in output
+
+
+def test_fetch_reports_drift_without_touching_any_local_state(project, capsys):
+    """
+    fetch is read-only - it must not write EDIT_FILE, advance the git
+    baseline, or touch staging/state, unlike pull or push's own drift
+    adoption.
+    """
+    _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
+
+    baseline_before = git_ops.show_at_head(project.PROJECT_DIR, 'device.config')
+    with open(project.EDIT_FILE) as file:
+        edit_file_before = file.read()
+    with open(project.STAGING_FILE) as file:
+        staging_before = file.read()
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_command.return_value = 'interface Gi1/0/1\n description Colleague\n'
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.fetch([])
+
+    output = capsys.readouterr().out
+    assert 'description Colleague' in output
+    mock_conn.send_config_set.assert_not_called()
+
+    assert git_ops.show_at_head(project.PROJECT_DIR, 'device.config') == baseline_before
+    with open(project.EDIT_FILE) as file:
+        assert file.read() == edit_file_before
+    with open(project.STAGING_FILE) as file:
+        assert file.read() == staging_before
     assert StateEngine(project).state.host_dirty is False
 
 
@@ -633,7 +726,7 @@ def test_push_adopting_drift_recomputes_against_the_live_config(project):
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
-        main_module.push(['-y', '--force'])
+        main_module.push(['-y', '--rebase'])
 
     pushed = mock_conn.send_config_set.call_args.args[0]
     # Recomputed against the live device, not the stale baseline.
@@ -686,7 +779,7 @@ def test_push_drift_that_already_matches_edits_sends_nothing(project):
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
-        main_module.push(['-y', '--force'])
+        main_module.push(['-y', '--rebase'])
 
     mock_conn.send_config_set.assert_not_called()
     assert StateEngine(project).state.host_dirty is False
@@ -1003,7 +1096,7 @@ def test_help_prints_usage_to_stdout_and_exits_cleanly(argv, monkeypatch, capsys
     assert captured.err == ''
 
 
-ALL_COMMANDS = ['init', 'pull', 'status', 'push', 'save', 'discard', 'revert']
+ALL_COMMANDS = ['init', 'pull', 'fetch', 'status', 'push', 'save', 'discard', 'revert']
 
 
 @pytest.mark.parametrize('command', ALL_COMMANDS)

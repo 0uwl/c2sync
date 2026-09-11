@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import tomllib
 
 from dataclasses import dataclass
 
@@ -9,18 +10,24 @@ from c2sync.exceptions import ProjectExistsError
 
 LOGGER = logging.getLogger(__name__)
 
-APP_CONFIG_NAME = 'c2sync.config'
+# Tracked in git, at the project directory's top level - see the module
+# docstring-ish note on Project.to_dict() for why. TOML (not JSON) so it's
+# meant to be hand-edited too, same rationale as user_config.py's global file.
+APP_CONFIG_NAME = 'c2sync.toml'
 DEVICE_CONFIG_NAME = 'device.config'
 STAGING_FILE_NAME = 'staging.txt'
 STATE_FILE_NAME = 'state.json'
-# The one thing still hidden: pure operational scratch nobody needs to open.
-# device.config, .gitignore and .git/ all sit at the project directory's top
-# level instead - see Project.at() and init_project() below.
+# The only thing still hidden: pure operational scratch nobody needs to
+# open, and - unlike APP_CONFIG_NAME - genuinely local to one checkout
+# (never committed, never travels with a clone). device.config, .gitignore,
+# .git/ and c2sync.toml all sit at the project directory's top level
+# instead - see Project.at() and init_project() below.
 SCRATCH_DIR_NAME = '.c2sync'
 # Every command except `init` expects cwd to already BE the project
-# directory (you `cd` into it, same as a git repo) - this is the marker
+# directory (you `cd` into it, same as a git repo) - these are the paths
 # get_project() looks for relative to cwd to confirm that.
 SCRATCH_DIR = os.path.join('.', SCRATCH_DIR_NAME)
+DEFAULT_CONFIG_FILE = os.path.join('.', APP_CONFIG_NAME)
 
 @dataclass
 class Project:
@@ -46,7 +53,7 @@ class Project:
     # is what a caller needs instead when project_dir isn't '.' (init
     # creating a fresh directory, a test using a tmp_path).
     PROJECT_DIR: str = '.'
-    CONFIG_FILE: str = os.path.join('.', SCRATCH_DIR_NAME, APP_CONFIG_NAME)
+    CONFIG_FILE: str = DEFAULT_CONFIG_FILE
     # The "baseline" (config as of the last confirmed push) is no longer a
     # separate file - it's whatever EDIT_FILE looks like at git HEAD in
     # PROJECT_DIR, the same way `git status` diffs against the index.
@@ -69,7 +76,7 @@ class Project:
         """
         return cls(
             PROJECT_DIR=project_dir,
-            CONFIG_FILE=os.path.join(project_dir, SCRATCH_DIR_NAME, APP_CONFIG_NAME),
+            CONFIG_FILE=os.path.join(project_dir, APP_CONFIG_NAME),
             EDIT_FILE=os.path.join(project_dir, DEVICE_CONFIG_NAME),
             STAGING_FILE=os.path.join(project_dir, SCRATCH_DIR_NAME, STAGING_FILE_NAME),
             STATE_FILE=os.path.join(project_dir, SCRATCH_DIR_NAME, STATE_FILE_NAME),
@@ -100,14 +107,12 @@ class Project:
         """
         Deliberately excludes PROJECT_DIR and the four file paths derived
         from it. A path is only ever valid relative to wherever `init` was
-        physically run from - but every command that later loads this
+        physically run from, but every command that later loads this
         config expects to run with cwd already inside the project
         directory (see get_project()), where the fixed '.'-relative
         defaults above are always correct regardless of how this directory
         was originally reached, what it was named at the time, or whether
-        it's since been moved or renamed. Storing them would just be a
-        stale, overridden-on-load copy of information the dataclass
-        defaults already provide for free.
+        it's since been moved, renamed, or cloned somewhere else entirely.
         """
         return {
         'NAME': self.NAME,
@@ -127,23 +132,25 @@ def init_project(project_config: Project) -> None:
     not be '.' - e.g. `c2sync init NAME ...` creates ./NAME by default; see
     Project.at()).
 
-    Refuses to run if the target already holds a c2sync project (a SCRATCH_
-    DIR_NAME already exists there) rather than silently overwriting its
-    device.config/c2sync.config - unlike `git init`, which is safe to rerun
+    Refuses to run if the target already holds a c2sync project (its
+    c2sync.toml already exists) rather than silently overwriting
+    device.config/c2sync.toml - unlike `git init`, which is safe to rerun
     in place, this also writes/would overwrite device.config, so the same
-    idempotent-rerun behavior would mean silent data loss.
+    idempotent-rerun behavior would mean silent data loss. Checking
+    c2sync.toml specifically (not the scratch dir) matters once c2sync.toml
+    is git-tracked: a freshly `git clone`d project has c2sync.toml but no
+    scratch dir yet, and must still be refused, not treated as untouched.
     """
-    scratch_dir = os.path.dirname(project_config.CONFIG_FILE)
-
-    if os.path.exists(scratch_dir):
+    if os.path.exists(project_config.CONFIG_FILE):
         raise ProjectExistsError(f'{project_config.PROJECT_DIR!r} is already a c2sync project')
 
     LOGGER.info(f'Creating project {project_config.NAME!r} in {project_config.PROJECT_DIR}')
     os.makedirs(project_config.PROJECT_DIR, exist_ok=True)
+
+    scratch_dir = os.path.dirname(project_config.STATE_FILE)
     os.makedirs(scratch_dir)
 
-    with open(project_config.CONFIG_FILE, 'w') as config_file:
-        json.dump(project_config.to_dict(), config_file)
+    _write_toml(project_config.CONFIG_FILE, project_config.to_dict())
 
     open(project_config.EDIT_FILE, 'w').close()
     open(project_config.STAGING_FILE, 'w').close()
@@ -151,14 +158,18 @@ def init_project(project_config: Project) -> None:
     with open(project_config.STATE_FILE, 'w') as state_file:
         json.dump({'host_dirty': False, 'device_dirty': False}, state_file)
 
-    # Only device.config itself is worth tracking/reviewing in git - the
-    # whole scratch directory is local operational state.
+    # Only the scratch dir is local operational state - device.config and
+    # c2sync.toml are both worth tracking/reviewing in git.
     gitignore_path = os.path.join(project_config.PROJECT_DIR, '.gitignore')
     with open(gitignore_path, 'w') as gitignore:
         gitignore.write(f'{SCRATCH_DIR_NAME}/\n')
 
     git_ops.init(project_config.PROJECT_DIR)
-    git_ops.commit(project_config.PROJECT_DIR, [DEVICE_CONFIG_NAME, '.gitignore'], 'c2sync init: empty baseline')
+    git_ops.commit(
+        project_config.PROJECT_DIR,
+        [DEVICE_CONFIG_NAME, '.gitignore', APP_CONFIG_NAME],
+        'c2sync init: empty baseline',
+    )
 
     LOGGER.info(f'Created project')
     print('C2Sync project initialized')
@@ -169,21 +180,76 @@ def get_project() -> Project | None:
         Get the C2Sync project object for the current working directory, or
         None if it isn't (or isn't inside) a c2sync project.
     """
-    if not os.path.exists(SCRATCH_DIR):
+    if not os.path.exists(DEFAULT_CONFIG_FILE):
         LOGGER.error(f'No project found in current working directory')
         return None
 
     config_dict = _load_configuration()
-
     c2sync = Project(**config_dict)
+
+    _ensure_scratch_state(c2sync)
 
     return c2sync
 
 
+def _ensure_scratch_state(project: Project) -> None:
+    """
+    Recreate the untracked operational scratch state (staging.txt,
+    state.json) if it's missing - the case right after a fresh `git clone`
+    of a c2sync project, since SCRATCH_DIR_NAME is gitignored and never
+    travels with the repo. This is what makes a plain clone sufficient to
+    start working, mirroring git itself needing no post-clone setup step:
+    the tracked c2sync.toml + device.config + history is enough on its own.
+
+    host_dirty=False is correct by construction here, not just a
+    placeholder default: a freshly cloned working tree always matches
+    HEAD, the same reasoning init_project() already relies on.
+    device_dirty=False is a real unknown (the device's actual state is
+    unread at this point) rather than a verified fact - `c2sync fetch`
+    is the way to true that up.
+
+    Safe to call unconditionally - the overwhelmingly common case (scratch
+    state already exists) is a single os.path.exists check and nothing
+    else happens.
+    """
+    if os.path.exists(SCRATCH_DIR):
+        return
+
+    print('Setting up local state for this project (first time here)...')
+    os.makedirs(SCRATCH_DIR)
+    open(project.STAGING_FILE, 'w').close()
+    with open(project.STATE_FILE, 'w') as state_file:
+        json.dump({'host_dirty': False, 'device_dirty': False}, state_file)
+
+
+def _write_toml(path: str, data: dict) -> None:
+    """
+    Minimal TOML writer for c2sync.toml's flat scalar fields (str/int only,
+    no nesting or arrays) - not a general-purpose TOML library, just enough
+    for Project.to_dict()'s shape. Reading it back uses stdlib tomllib
+    (read-only), same as user_config.py's global config file.
+
+    None values are omitted entirely rather than written as empty/null,
+    since TOML has no null type - this is also what keeps an SSH project's
+    c2sync.toml free of a meaningless SERIAL_DEVICE line, and vice versa.
+    """
+    lines = []
+    for key, value in data.items():
+        if value is None:
+            continue
+        if isinstance(value, str):
+            escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+            lines.append(f'{key} = "{escaped}"')
+        else:
+            lines.append(f'{key} = {value}')
+
+    with open(path, 'w') as file:
+        file.write('\n'.join(lines) + '\n')
+
+
 def _load_configuration() -> dict:
-    config_file_path = os.path.join(SCRATCH_DIR, APP_CONFIG_NAME)
-    with open(config_file_path, 'r') as config_file:
-        config_dict: dict = json.load(config_file)
+    with open(DEFAULT_CONFIG_FILE, 'rb') as config_file:
+        config_dict: dict = tomllib.load(config_file)
 
     LOGGER.info(f'Loaded configuration: {config_dict}')
 

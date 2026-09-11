@@ -31,13 +31,28 @@ already built, even in places where it was never written down as a rule until no
   stops holding.
 - **Push safety.** The out-of-band drift check (see below) is framed and built as
   `git push` without a fetch: read the remote's current state first, and refuse to push
-  over a target that's moved, rather than trusting a stale local diff.
+  over a target that's moved, rather than trusting a stale local diff. The flag that
+  authorizes adopting that drift is named `push --rebase`, not `--force` — what it
+  actually does (replay the staged commands on top of the device's moved-on state,
+  leaving `device.config` itself untouched) is a rebase, not a blind overwrite, and the
+  name should tell a git-literate operator exactly that.
+- **Fetch vs. pull.** `c2sync fetch` is the read-only device-drift check — connect, read,
+  report, touch nothing local — mirroring git's own `fetch` (look only) against `pull`
+  (fetch *and* merge, which is what `c2sync pull` already did before `fetch` existed).
+  `push`'s own drift check is effectively an inline `fetch` it happens to also act on;
+  `fetch` is that same read made available on demand, closing the one real gap in an
+  otherwise offline `status` (see On-demand change detection below).
 - **Recovery.** `revert` is modeled on `git revert` (a new commit undoing prior state),
   not `git reset --hard` (rewinding history), specifically so a bad push stays visible
   in `git log` instead of being erased.
 - **Refusing silent loss.** `pull`/`revert` both refuse to overwrite unpushed local
   edits unless explicitly forced — the same instinct behind git refusing a
   non-fast-forward `pull` rather than silently discarding local commits.
+- **A project should survive a clone.** Connection info (`TRANSPORT`, `SERIAL_DEVICE`/
+  `HOST`, etc.) is tracked in git via `c2sync.toml`, not left in gitignored scratch state
+  — the same instinct behind git tracking everything a checkout needs to keep working,
+  never requiring a manual post-clone setup step for anything but genuinely local
+  scratch. See Connection info is git-tracked below.
 
 **Where this stops:** the device is not a git remote, and c2sync should not try to make
 it one. Git's model assumes structured objects, history, and merges on both ends; a
@@ -72,11 +87,12 @@ pytest c2sync/tests/test_differ.py::test_refresh_staging_stages_additions_with_c
 
 # Run the CLI locally (after install; requires a real or mocked device connection for
 # anything beyond `init`/`status`/`discard`)
-c2sync init NAME SERIAL_DEVICE [BAUDRATE] [--dir PATH]   # serial transport
-c2sync init NAME --ssh HOST [PORT] [--dir PATH]          # SSH transport
+c2sync init NAME SERIAL_DEVICE [BAUDRATE] [--dir PATH] [--pull]   # serial transport
+c2sync init NAME --ssh HOST [PORT] [--dir PATH] [--pull]          # SSH transport
 c2sync pull [--force|-f]
+c2sync fetch
 c2sync status
-c2sync push [-y] [--force|-f] [--rollback-on-error]
+c2sync push [-y] [--rebase] [--rollback-on-error]
 c2sync save [-y]
 c2sync discard
 c2sync revert [COMMIT] [-y] [--force|-f]   # COMMIT defaults to HEAD
@@ -117,24 +133,25 @@ directly in the working directory. The project directory now mirrors that split:
 ```
 myrouter/                 <- what you `cd` into; PROJECT_DIR is '.' from in here
 ├── device.config         <- EDIT_FILE, what you edit, tracked in git
+├── c2sync.toml            <- CONFIG_FILE, the serialized Project, tracked in git
 ├── .gitignore             <- excludes .c2sync/ - the only entry it needs
 ├── .git/                  <- real git repo, git_ops.init() ran here
 └── .c2sync/               <- the only hidden part: pure operational scratch
-    ├── c2sync.config      <- CONFIG_FILE, the serialized Project (see below)
     ├── staging.txt        <- STAGING_FILE, recomputed CLI commands, fully overwritten each check
     └── state.json         <- STATE_FILE, {host_dirty, device_dirty}, see State tracking below
 ```
 
 `device.config` is tracked in git; the baseline is `device.config` at git `HEAD`, not a
-separate file (see On-demand change detection below). The three `.c2sync/` files are
+separate file (see On-demand change detection below). `c2sync.toml` is tracked
+too - see "Connection info is git-tracked" below for why. The two `.c2sync/` files are
 never committed - `.gitignore`'s one line (`.c2sync/`) excludes the whole subfolder,
 rather than naming each file, so nothing new added there later needs a matching entry.
 
 **Every command except `init` expects cwd to already be inside the project directory** -
 the same way `git status` expects to be run from inside the repository, not handed a
-path to one. `get_project()` looks for `./.c2sync` relative to cwd; there's no walking
-up the tree the way git finds `.git` from a subdirectory, so the project's own top level
-is the only place commands work from today.
+path to one. `get_project()` looks for `./c2sync.toml` relative to cwd; there's no
+walking up the tree the way git finds `.git` from a subdirectory, so the project's own
+top level is the only place commands work from today.
 
 **`Project.at(project_dir, **kwargs)`** (`c2sync/__init__.py`) is what actually builds a
 `Project` for a location other than `.`. The dataclass's own field defaults for
@@ -149,15 +166,57 @@ it.** A path is only ever valid relative to wherever `init` was physically run f
 every later command loads this config expecting cwd to already be inside the project -
 so the fixed `.`-relative dataclass defaults are what should apply on load, not
 whatever path happened to resolve at creation time. This is also what makes a renamed or
-moved project directory keep working with no migration: nothing in `c2sync.config`
+moved project directory keep working with no migration: nothing in `c2sync.toml`
 encodes where the directory used to be, or is.
 
 `init_project()` refuses to run (raises `ProjectExistsError`, caught in `main.py` and
-turned into a clean exit) if `PROJECT_DIR/.c2sync/` already exists, rather than
-silently overwriting an existing project's `device.config`/`c2sync.config`. This is
+turned into a clean exit) if `PROJECT_DIR/c2sync.toml` already exists, rather than
+silently overwriting an existing project's `device.config`/`c2sync.toml`. This is
 stricter than `git init`'s own idempotent-rerun behavior on purpose: `git init` in an
 existing repo is harmless, but c2sync's `init` also writes `device.config`, so the same
-idempotence would mean silent data loss on a second run.
+idempotence would mean silent data loss on a second run. Checking `c2sync.toml`
+specifically (not the scratch dir) is what makes this guard correct after a `git clone`
+too, per the next section - a freshly cloned project has `c2sync.toml` but no scratch
+dir yet, and must still be refused rather than treated as blank.
+
+### Connection info is git-tracked (`c2sync.toml`)
+
+`c2sync.toml` holds the serialized `Project` - `NAME`, `TRANSPORT`, `SERIAL_DEVICE`/
+`HOST`, `BAUDRATE`/`SSH_PORT`, `TIMEOUT`, `PROMPT_REGEX` (everything `Project.to_dict()`
+returns) - and is committed by `init_project()` in the same first commit as
+`device.config` and `.gitignore`. This is what makes `git clone`ing a c2sync project
+directory actually work: without it, the connection details lived only in the gitignored
+scratch dir, so a fresh clone had `device.config` and history but no way to know what
+device to talk to - a real gap, since the whole point of tracking the project in git is
+that it travels. None of this is secret: a serial device path, a hostname, a baud rate,
+and a timeout carry no credentials (those are never persisted anywhere - see Global user
+config and the CLI surface's `_connect()` notes below), so committing and pushing them is
+safe by the same reasoning that makes `device.config` itself safe to push.
+
+TOML, not JSON, for the same reason as `user_config.py`'s global preferences file: it's
+meant to be hand-editable too (a device gets a new IP, a baud rate changes). Reading uses
+stdlib `tomllib` (read-only, Python 3.11+); writing uses a small hand-rolled
+`_write_toml()` rather than pulling in `tomli-w` as a dependency, since the data is
+always flat scalars (str/int, no nesting or arrays) - genuinely nothing a real TOML
+writer would buy here. TOML has no null type, so `_write_toml()` skips `None`-valued
+fields entirely rather than writing them as empty/null - `SERIAL_DEVICE` is simply absent
+from an SSH project's `c2sync.toml`, and `HOST` from a serial project's, rather than
+either being present-but-empty. Fields that always hold a real value regardless of
+`TRANSPORT` (`BAUDRATE`, `SSH_PORT`) are written either way, even when meaningless for
+the project's actual transport - only fields that are genuinely `None` get omitted.
+
+**Auto-bootstrapping scratch state after a clone.** `.c2sync/`'s two files
+(`staging.txt`, `state.json`) are pure local operational scratch and stay gitignored -
+they never travel with a clone, on purpose (see the directory-layout intro above). So a
+fresh `git clone` leaves a project with `c2sync.toml`/`device.config`/history but no
+`.c2sync/` yet. `get_project()` calls `_ensure_scratch_state()` on every load, which
+recreates `staging.txt` and `state.json` from scratch if `.c2sync/` doesn't exist -
+mirroring git itself needing no post-clone setup step beyond the clone. `host_dirty` is
+correctly initialized `False` here, not just a placeholder: a freshly cloned working tree
+always matches `HEAD` by construction, the same reasoning `init_project()` already relies
+on for a brand-new project. `device_dirty` is also initialized `False`, but that one's a
+real unknown rather than a verified fact - the device's actual state hasn't been read at
+clone time; `c2sync fetch` (see CLI surface below) is how an operator trues that up.
 
 ### Module map
 
@@ -170,7 +229,7 @@ idempotence would mean silent data loss on a second run.
 | `c2sync/user_config.py` | Reads the optional global TOML preferences file — `load()`/`config_path()` |
 | `c2sync/state_engine.py` | `StateEngine` — `host_dirty`/`device_dirty` tracking |
 | `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigSaveError`, `HostKeyRejectedError`, `ProjectExistsError` |
-| `c2sync/main.py` | CLI entry point: `init` / `pull` / `status` / `push` / `save` / `discard` / `revert` |
+| `c2sync/main.py` | CLI entry point: `init` / `pull` / `fetch` / `status` / `push` / `save` / `discard` / `revert` |
 
 ### Diff → CLI command translation (`differ.py`)
 
@@ -309,11 +368,18 @@ untouched and the command behaves exactly as before.
 
 On drift it prints what changed on the device, then:
 
-- `--force`/`-f` — adopt without asking.
+- `--rebase` — adopt without asking. Named `--rebase`, not `--force`/`-f` like
+  `pull`/`revert` use for their own overwrite-approval flag: what this actually does is
+  replay the staged commands on top of the device's moved-on state (`EDIT_FILE` itself is
+  never touched), which is a rebase, not a force-overwrite — see Git as the mental model
+  above. No short form, unlike `pull -f`/`revert -f`: this is reached for rarely enough
+  (only on genuine out-of-band drift) that a terse alias isn't worth the risk of it being
+  typed reflexively.
 - `-y` alone — **hard failure, exit 1**, never a prompt. `-y` means "don't ask me to
   confirm my own commands", not "silently overwrite someone else's work", and prompting
-  here would hang a CI job on stdin. Same flag split as `pull`/`revert`, where `-y` and
-  `--force` are also deliberately independent.
+  here would hang a CI job on stdin. Same independent-flag split as `pull`/`revert`,
+  where `-y` and `--force` are also deliberately separate flags — `push` just names its
+  own version of that second flag differently, for the reason above.
 - otherwise — prompt; declining exits 1 with nothing sent.
 
 Adopting calls `git_ops.commit_content()` (which is why that function exists in the
@@ -338,7 +404,10 @@ post-push re-read).
 connecting, so drift goes undetected there. That is safe — no commands are generated
 from the stale baseline — but it does mean `status` alone can report `synced` for a
 device that has drifted. `status` is deliberately offline (the `git status` analog), so
-detecting that would need its own opt-in device read.
+detecting that would need its own opt-in device read — which is exactly what `c2sync
+fetch` is, see CLI surface below. `_detect_drift()` is the small shared helper
+(`main.py`) both `_reconcile_out_of_band_drift()` and `fetch()` call, so the two never
+disagree on what counts as "changed".
 
 ### Partial-push reconciliation (`push`'s error path)
 
@@ -402,33 +471,46 @@ even though the rest of the tool leans into it — and note `save` still records
 git commit via `git_ops.commit_empty()`, so "commit" survives as an implementation
 detail, not as the user-facing verb.
 
-Actual commands: `init`, `pull`, `status`, `push`, `save`, `discard`, `revert`. `pull`
-connects, fetches `show running-config brief`, writes it to `EDIT_FILE`, and commits it
-— this is how an already-configured device gets onboarded (`init` alone only creates an
-empty `device.config`), and it doubles as a way to resync the baseline if the device
-changed out-of-band. It refuses to run while `host_dirty` unless passed `--force`/`-f`
-(would silently clobber uncommitted local edits); when not `host_dirty` it needs no
-confirmation at all, since there's nothing local to lose. `pull` has no `-y` — it has no
-other prompt to skip, so (like `revert`, see below) the overwrite-approval flag is
-`--force`/`-f` specifically, never a generic "don't ask me anything" flag. `status` is read-only
-(recomputes staging, prints state + preview, never connects to the device — this is the
-`git status` analog). `push` checks the device for out-of-band drift first (see
-Out-of-band drift check above), sends the staged commands, then re-fetches `show running-config brief`,
-writes it to `EDIT_FILE`, and makes a real git commit in `PROJECT_DIR` (`git_ops.
-commit()`) — advancing `HEAD` *is* advancing the baseline now. When the push is rejected
-partway it does *not* just bail: see Partial-push reconciliation above. `save` refuses to run
-while `host_dirty` (would save unintended state to startup-config), saves
-running→startup only when `device_dirty`, and records that milestone as an empty git
-commit (`git_ops.commit_empty()`) since there's no file content to stage for it.
-`discard` reverts `EDIT_FILE` to `device.config` at git `HEAD` (not just clearing
-staging) so discarded edits can't get silently re-staged on the next check.
+Actual commands: `init`, `pull`, `fetch`, `status`, `push`, `save`, `discard`, `revert`.
+`pull` connects, fetches `show running-config brief`, writes it to `EDIT_FILE`, and
+commits it — this is how an already-configured device gets onboarded (`init` alone only
+creates an empty `device.config`, unless `--pull` is also given — see below), and it
+doubles as a way to resync the baseline if the device changed out-of-band. It refuses to
+run while `host_dirty` unless passed `--force`/`-f` (would silently clobber uncommitted
+local edits); when not `host_dirty` it needs no confirmation at all, since there's
+nothing local to lose. `pull` has no `-y` — it has no other prompt to skip, so (like
+`revert`, see below) the overwrite-approval flag is `--force`/`-f` specifically, never a
+generic "don't ask me anything" flag. `fetch` is `pull`'s read-only sibling — same
+connect-and-read, but reports what differs from the baseline without writing
+`EDIT_FILE`, touching staging, or committing anything; it's the exact same read-and-diff
+`push` already does as a pre-flight (`_detect_drift()`, shared by both), just available
+on demand instead of only as a side effect of pushing. This is what lets an operator
+check for out-of-band drift without either connecting blind during a push or trusting
+`status`, which is deliberately offline and so cannot see it (see Out-of-band drift check
+above). `status` is read-only (recomputes staging, prints state + preview, never
+connects to the device — this is the `git status` analog). `push` checks the device for
+out-of-band drift first (see Out-of-band drift check above), sends the staged commands,
+then re-fetches `show running-config brief`, writes it to `EDIT_FILE`, and makes a real
+git commit in `PROJECT_DIR` (`git_ops.commit()`) — advancing `HEAD` *is* advancing the
+baseline now. When the push is rejected partway it does *not* just bail: see Partial-push
+reconciliation above. `save` refuses to run while `host_dirty` (would save unintended
+state to startup-config), saves running→startup only when `device_dirty`, and records
+that milestone as an empty git commit (`git_ops.commit_empty()`) since there's no file
+content to stage for it. `discard` reverts `EDIT_FILE` to `device.config` at git `HEAD`
+(not just clearing staging) so discarded edits can't get silently re-staged on the next
+check.
 
 `init` also runs `git init -b main` in `PROJECT_DIR` and makes the first commit
-(empty `device.config` + the `.gitignore`) — see Project directory model above for the
-directory layout, `NAME`/`--dir` resolution, and why re-running `init` on an existing
-project refuses rather than overwriting it. `c2sync` intentionally does not wrap
-`git log`/`diff`/`branch`/PR review; the same repo is a normal git repo the user can
-drive directly with `git` or push to GitHub/GitLab for review.
+(empty `device.config`, `c2sync.toml`, and `.gitignore`) — see Project directory model
+above for the directory layout, `NAME`/`--dir` resolution, and why re-running `init` on
+an existing project refuses rather than overwriting it. `init --pull` runs `pull`'s own
+fetch-and-commit logic (`_pull_running_config()`, the shared helper the two call)
+immediately afterward, over the same connection — onboarding an already-configured
+device in one step instead of two, mirroring `git clone` doing an initial fetch for you
+rather than leaving that as a separate manual step after `git init` + adding a remote.
+`c2sync` intentionally does not wrap `git log`/`diff`/`branch`/PR review; the same repo
+is a normal git repo the user can drive directly with `git` or push to GitHub/GitLab for
+review.
 
 `revert [COMMIT] [-y] [--force|-f]` is the manual recovery path for a bad push (e.g. a
 batch where command 3 of 8 got rejected after 1-2 already landed) — see Known
@@ -499,7 +581,7 @@ Passwords/enable-secrets are **never** read from the global config file or store
 anywhere by c2sync itself — env vars are meant to be injected by the CI system's own
 secrets manager. Note `push -y` fails closed on out-of-band drift rather than
 prompting, which is what keeps a CI job from pushing against a stale baseline;
-`--force` is the opt-out. Combined with `push -y`/`save -y` (skips the confirmation prompt
+`--rebase` is the opt-out. Combined with `push -y`/`save -y` (skips the confirmation prompt
 too), this is what unblocks the PR-merge-triggers-apply workflow: a CI job that runs
 `c2sync push -y` against the device once a config change is reviewed and merged, which
 is the actual payoff of tracking device config in git rather than just having a
