@@ -24,6 +24,7 @@ c2sync COMMAND [ARGS]
 Commands:
     init      Start a project for one device
     pull      Fetch the device's running config and make it the new baseline
+    fetch     Check the device for drift without changing any local state
     status    Show unpushed local edits and unsaved device changes
     push      Preview the staged commands and push them to the device
     save      Save the device's running config to its startup config
@@ -42,20 +43,22 @@ HELP_FLAGS = ('-h', '--help')
 
 COMMAND_HELP = {
     'init': """
-Usage: c2sync init NAME SERIAL_DEVICE [BAUDRATE] [--dir PATH]
-       c2sync init NAME --ssh HOST [PORT] [--dir PATH]
+Usage: c2sync init NAME SERIAL_DEVICE [BAUDRATE] [--dir PATH] [--pull]
+       c2sync init NAME --ssh HOST [PORT] [--dir PATH] [--pull]
 
 Start a C2Sync project for one device.
 
 Creates ./NAME/ (or PATH, if --dir is given) holding device.config - the
-file you edit - plus a real git repository (initialized there, with the
-first commit being an empty device.config). Everything c2sync itself needs
-but you never do (staging.txt, state.json, c2sync.config) lives out of the
-way in a NAME/.c2sync/ subfolder, git-ignored entirely. `cd` into the
-project directory before running any other command - they all expect cwd to
-already be inside it, the same way `git status` expects to be run from
-inside the repository. Run `c2sync pull` next to onboard a device that
-already has a configuration.
+file you edit - and c2sync.toml - the device's connection info - plus a real
+git repository (initialized there, with the first commit covering both,
+alongside .gitignore). Both files are tracked in git, so a `git clone` of
+this project is enough on its own to keep working with; the only thing that
+stays local and untracked is a NAME/.c2sync/ subfolder holding staging.txt
+and state.json - operational scratch nobody needs to open, silently
+recreated if missing (e.g. right after a clone). `cd` into the project
+directory before running any other command - they all expect cwd to already
+be inside it, the same way `git status` expects to be run from inside the
+repository.
 
 Arguments:
   NAME           Project name - also the default directory (./NAME), unless
@@ -70,9 +73,15 @@ Options:
   --dir PATH  Create the project at PATH instead of ./NAME. NAME is still
               required - it's the project's identifier either way, not just
               a directory name.
+  --pull      Immediately fetch the device's current running config as the
+              baseline, same as running `c2sync pull` right after - for
+              onboarding a device that's already configured, in one step
+              instead of two (mirrors `git clone` doing a fetch for you).
+              Without it, `init` alone just creates an empty device.config;
+              run `c2sync pull` separately when you're ready to connect.
 
 Refuses to run if the target directory already holds a c2sync project,
-rather than overwriting its device.config/c2sync.config.
+rather than overwriting its device.config/c2sync.toml.
 
 SSH host keys are verified against ~/.ssh/known_hosts
 """,
@@ -83,12 +92,33 @@ Usage: c2sync pull [--force|-f]
 Fetch the device's running config and commit it as the new baseline.
 
 This is how an already-configured device gets onboarded, since `init` alone
-only creates an empty device.config. It also resyncs the baseline when the
-device was changed outside of C2Sync.
+only creates an empty device.config (or use `c2sync init --pull` to do both
+in one step). It also resyncs the baseline when the device was changed
+outside of C2Sync. Run `c2sync fetch` first if you just want to see what
+changed without committing to it.
 
 Options:
   --force, -f  Overwrite unpushed local edits. Without it, pull refuses to
                run while you have local edits that would be lost.
+""",
+
+    'fetch': """
+Usage: c2sync fetch
+
+Check the device for drift without changing any local state.
+
+Connects, reads the live running config, and reports how it differs from
+the baseline (device.config at git HEAD) - device.config, staging, and
+state.json are all left untouched either way. This is the read-only half of
+what `push` already does as a pre-flight before adopting drift and sending
+commands; `fetch` is the same check available on demand, mirroring git's own
+fetch (look only) vs. pull (fetch and merge) split.
+
+Closes a gap `status` cannot: status is deliberately offline (it only
+compares device.config against your local edits), so it can report the
+device as synced even when it has actually drifted out-of-band. Run
+`c2sync pull --force` to take the device as-is, or `c2sync push --rebase` to
+adopt the drift as the new baseline and push your local edits on top of it.
 """,
 
     'status': """
@@ -102,7 +132,7 @@ of anything staged. Read-only, and never connects to the device.
 """,
 
     'push': """
-Usage: c2sync push [-y] [--force|-f] [--rollback-on-error]
+Usage: c2sync push [-y] [--rebase] [--rollback-on-error]
 
 Preview the staged commands and push them to the device.
 
@@ -114,7 +144,9 @@ device.config, and commits it, advancing the baseline.
 
 Options:
   -y                    Skip the confirmation prompt.
-  --force, -f           Adopt out-of-band device changes without asking.
+  --rebase              Adopt out-of-band device changes as the new
+                        baseline without asking, then replay your staged
+                        commands on top of it.
   --rollback-on-error   If the device rejects a command after earlier ones
                         already applied, offer to undo them by pushing the
                         device back to the pre-push baseline.
@@ -123,15 +155,18 @@ If the device was changed outside C2Sync since the last push, the staged
 commands describe a device that no longer exists -- a line you deleted
 locally still becomes `no <that line>` and can destroy someone else's
 replacement for it, with nothing in the preview hinting at it. So push
-checks first and stops, showing what changed on the device. Accepting
-adopts the device's current config as the new baseline (your edits in
-device.config are left alone) and recomputes, so the preview you approve is
-the truth. The recomputed commands will include undoing those out-of-band
-changes, since your file does not contain them -- that is the point: it
-happens either way, and this is the version where you see it first.
+checks first and stops, showing what changed on the device (run `c2sync
+fetch` any time to see this without pushing). Accepting adopts the device's
+current config as the new baseline (your edits in device.config are left
+alone) and recomputes, so the preview you approve is the truth -- this is
+what --rebase names: your edits are replayed on top of the device's moved-on
+state, not overwritten by it. The recomputed commands will include undoing
+those out-of-band changes, since your file does not contain them -- that is
+the point: it happens either way, and this is the version where you see it
+first.
 
 -y does not stand in for that decision, and never prompts for it: with -y
-and no --force, drift is a hard failure, so a CI job stops instead of
+and no --rebase, drift is a hard failure, so a CI job stops instead of
 pushing against a stale baseline.
 
 A command the device rejects aborts the batch, and the commands before it
@@ -236,6 +271,8 @@ def main():
             init(command_arguments)
         case 'pull':
             pull(command_arguments)
+        case 'fetch':
+            fetch(command_arguments)
         case 'status':
             status(command_arguments)
         case 'push':
@@ -253,8 +290,8 @@ def main():
 
 
 _INIT_USAGE = (
-    'Usage: c2sync init NAME SERIAL_DEVICE [BAUDRATE] [--dir PATH]\n'
-    '       c2sync init NAME --ssh HOST [PORT] [--dir PATH]'
+    'Usage: c2sync init NAME SERIAL_DEVICE [BAUDRATE] [--dir PATH] [--pull]\n'
+    '       c2sync init NAME --ssh HOST [PORT] [--dir PATH] [--pull]'
 )
 
 
@@ -273,6 +310,13 @@ def init(arguments: list):
             print(f'{_INIT_USAGE}\n\n--dir requires a path')
             sys.exit(1)
         del positional[idx:idx + 2]
+
+    # Mirrors `git clone`: onboard an already-configured device in one step
+    # instead of `init` then a separate `pull`. Pulled out before the
+    # remaining positional parsing below for the same reason --dir is.
+    do_pull = '--pull' in positional
+    if do_pull:
+        positional.remove('--pull')
 
     if not positional:
         print(_INIT_USAGE)
@@ -309,12 +353,24 @@ def init(arguments: list):
         project_kwargs['PROMPT_REGEX'] = config['prompt_regex']
 
     project_dir = project_dir_override or os.path.join('.', name)
+    project = Project.at(project_dir, NAME=name, **project_kwargs)
 
     try:
-        init_project(Project.at(project_dir, NAME=name, **project_kwargs))
+        init_project(project)
     except ProjectExistsError as e:
         print(str(e))
         sys.exit(1)
+
+    if do_pull:
+        # Reuses pull()'s own fetch-and-commit logic on the just-created
+        # project - the device is already configured, so onboarding it is
+        # `init` followed immediately by a `pull`, done here as one step
+        # instead of two (mirrors `git clone` vs. `git init` + a manual
+        # first fetch). A connection failure here must not look like `init`
+        # itself failed - the project now exists either way.
+        with _connected(project) as interface:
+            _pull_running_config(project, interface)
+        print('Pulled running config from device.')
 
     if project_dir != '.':
         print(f'Run `cd {project_dir}` to enter the project.')
@@ -343,7 +399,21 @@ def pull(arguments: list):
         sys.exit(1)
 
     with _connected(project) as interface:
-        new_config = interface.get_running_config()
+        _pull_running_config(project, interface)
+
+    print('Pulled running config from device.')
+
+
+def _pull_running_config(project: Project, interface) -> None:
+    """
+    The actual fetch-and-commit that both `pull` and `init --pull` need:
+    read the running config, write it to EDIT_FILE, commit it as the new
+    baseline, and clear any (stale, pre-pull) staged commands. Must run
+    inside a caller's own `_connected()` block - `init --pull` reuses the
+    same connection it authenticated for onboarding rather than opening a
+    second one.
+    """
+    new_config = interface.get_running_config()
 
     with open(project.EDIT_FILE, 'w') as file:
         file.write(new_config)
@@ -352,7 +422,41 @@ def pull(arguments: list):
 
     Differ(project).clear_staging()
     StateEngine(project).mark_host_clean()
-    print('Pulled running config from device.')
+
+
+def fetch(arguments: list):
+    """
+    Read-only device-drift check: connect, read the live running config, and
+    report how it differs from the baseline (device.config at git HEAD) -
+    without touching device.config, staging, or state.json.
+
+    Mirrors git's own fetch/pull split: `pull` is fetch-and-merge (it
+    overwrites EDIT_FILE and advances the baseline), `fetch` is look-only.
+    This closes a real gap `status` cannot: status is deliberately offline
+    (see On-demand change detection), so it can report "synced" for a
+    device that has actually drifted out-of-band. `push` already does this
+    same read-and-diff as a pre-flight before adopting drift and sending
+    commands; `fetch` is the same check available on demand, with nothing
+    adopted and nothing sent.
+    """
+    LOGGER.debug(f'Given arguments: {arguments}')
+
+    project = _require_project()
+
+    with _connected(project) as interface:
+        _, drift = _detect_drift(project, interface)
+
+    if not drift:
+        print('No drift: the device matches the local baseline (device.config at HEAD).')
+        return
+
+    print("The device has changed outside C2Sync since the last push/pull - here's what\n"
+          'differs from the local baseline:\n')
+    for line in drift:
+        print(f'  {line}')
+    print('\nNothing was changed locally or on the device. Run `c2sync pull --force` to take '
+          'the device as-is (overwriting local edits), or `c2sync push --rebase` to adopt this '
+          'as the new baseline and push your local edits on top of it.')
 
 
 def status(arguments: list):
@@ -386,8 +490,14 @@ def push(arguments: list):
     assume_yes = '-y' in arguments
     # Deliberately not the same flag as -y: -y means "don't ask me to
     # confirm my own commands", never "silently overwrite changes someone
-    # else made to the device".
-    force = '--force' in arguments or '-f' in arguments
+    # else made to the device". Named --rebase, not --force: what it does
+    # is adopt the device's moved-on state as the new baseline and replay
+    # the staged commands on top of it - a rebase, not a blind overwrite -
+    # so that's the name that tells a git-literate operator what actually
+    # happens. No short form, unlike pull/revert's --force/-f: this flag is
+    # reached for rarely enough (only on genuine out-of-band drift) that a
+    # short alias isn't worth the risk of it being typed reflexively.
+    rebase = '--rebase' in arguments
     rollback_on_error = '--rollback-on-error' in arguments
 
     project = _require_project()
@@ -404,7 +514,7 @@ def push(arguments: list):
         # baseline. Check that against the device before showing a preview
         # anyone is asked to approve - otherwise the preview describes a
         # device that may not exist any more. See the helper for why.
-        lines = _reconcile_out_of_band_drift(project, interface, lines, assume_yes, force)
+        lines = _reconcile_out_of_band_drift(project, interface, lines, assume_yes, rebase)
 
         if not lines:
             print('\nYour edits are already on the device - nothing left to push.')
@@ -605,8 +715,25 @@ def revert(arguments: list):
     print('\nReverted. Device has pending changes not yet saved to startup-config (run `c2sync save`).')
 
 
+def _detect_drift(project: Project, interface) -> tuple[str, list[str]]:
+    """
+    Read the live running config and diff it against the baseline
+    (device.config at git HEAD), with a tree diff rather than string
+    equality so formatting noise in `show running-config` is not mistaken
+    for a change.
+
+    Returns (live_config, drift_lines) - shared by `fetch` (report-only) and
+    `_reconcile_out_of_band_drift` (push's pre-flight, which also acts on
+    it). Kept as one function so the two never drift apart on what counts
+    as "changed".
+    """
+    baseline = git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) or ''
+    live = interface.get_running_config()
+    return live, Differ.diff_lines(baseline, live)
+
+
 def _reconcile_out_of_band_drift(
-    project: Project, interface, lines: list[str], assume_yes: bool, force: bool,
+    project: Project, interface, lines: list[str], assume_yes: bool, rebase: bool,
 ) -> list[str]:
     """
     Verify the device still matches the baseline the staged commands were
@@ -624,20 +751,18 @@ def _reconcile_out_of_band_drift(
     hinting at it. This is `git push` without a fetch, and the fix is the
     one git uses - check first, and refuse to push over a moved target.
 
-    Drift is detected with a tree diff rather than string equality, so
-    formatting noise in `show running-config` is not mistaken for a change.
-
     On drift, adopting the live config as the new baseline (via
     `git_ops.commit_content`, which leaves EDIT_FILE alone) and recomputing
     keeps the user's edits *and* makes the resulting preview honest. Note
     the recomputed commands will include undoing the out-of-band changes,
     since EDIT_FILE does not contain them - that is the point: it happens
     either way, and this is the version where the user sees it first.
-    """
-    baseline = git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) or ''
-    live = interface.get_running_config()
 
-    drift = Differ.diff_lines(baseline, live)
+    This is genuinely a rebase, not a force-overwrite - EDIT_FILE (the
+    user's work) is untouched, only the baseline it's replayed against
+    moves - which is why the flag that authorizes it is named --rebase.
+    """
+    live, drift = _detect_drift(project, interface)
     if not drift:
         return lines
 
@@ -647,12 +772,12 @@ def _reconcile_out_of_band_drift(
     for line in drift:
         print(f'  {line}')
 
-    if force:
-        print("\n--force: adopting the device's current config as the new baseline.")
+    if rebase:
+        print("\n--rebase: adopting the device's current config as the new baseline.")
     elif assume_yes:
         # -y must never stand in for this decision, and prompting here
         # would hang a CI job on stdin - so fail, loudly and non-zero.
-        print('\nRefusing to push against a stale baseline. Re-run with --force to adopt\n'
+        print('\nRefusing to push against a stale baseline. Re-run with --rebase to adopt\n'
               "the device's current config as the baseline and recompute the commands,\n"
               'or `c2sync pull --force` to take the device as-is and drop your edits.')
         sys.exit(1)

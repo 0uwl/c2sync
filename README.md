@@ -24,12 +24,14 @@ Cisco IOS only, one device per project — a deliberate starting scope, not an o
 
 ## Key Features
 
-Each `c2sync init NAME ...` creates a project (`./NAME/` by default, or `--dir PATH`) for **one device**. The project directory is a real git repository, and only its operational scratch state (`.c2sync/`) is hidden — `device.config`, the file you actually edit, sits right at the top level next to `.git/`, the same way any other git-tracked file does:
+Each `c2sync init NAME ...` creates a project (`./NAME/` by default, or `--dir PATH`) for **one device**. The project directory is a real git repository, and only its operational scratch state (`.c2sync/`) is hidden — `device.config` (the file you actually edit) and `c2sync.toml` (the device's connection info) both sit right at the top level next to `.git/`, the same way any other git-tracked file does:
 
 * `device.config` — the file you edit, tracked in git with one commit per confirmed push (plus an empty commit marking each save to startup-config)
+* `c2sync.toml` — the device's connection info (transport, serial port/host, baud rate/SSH port, timeout), also tracked in git. This is what makes `git clone`ing a project directory actually work: connection details travel with the repo instead of living only in local, gitignored state, and no secret ever lives here — credentials are never stored by c2sync at all (see Credentials below)
 * Local edits are diffed against the last confirmed push — `device.config` as of git `HEAD` — on demand, same as `git status`
 * Staged changes are rebuilt into Cisco IOS CLI commands that respect configuration context (see Local Editing below)
 * Pushes are verified against the device's own response; a rejected command aborts the rest of the push, but leaves successful commands on the device
+* `c2sync fetch` checks the device for drift without changing any local state, closing the one gap the otherwise-offline `status` can't see on its own
 
 ## Installation
 
@@ -222,6 +224,7 @@ c2sync COMMAND [ARGS]
 Commands:
     init      Start a project for one device
     pull      Fetch the device's running config and make it the new baseline
+    fetch     Check the device for drift without changing any local state
     status    Show unpushed local edits and unsaved device changes
     push      Preview the staged commands and push them to the device
     save      Save the device's running config to its startup config
@@ -246,15 +249,16 @@ Each command is covered in detail under General workflow below.
 ### 1. Init
 
 ```
-c2sync init NAME SERIAL_DEVICE [BAUDRATE] [--dir PATH]
-c2sync init NAME --ssh HOST [PORT] [--dir PATH]
+c2sync init NAME SERIAL_DEVICE [BAUDRATE] [--dir PATH] [--pull]
+c2sync init NAME --ssh HOST [PORT] [--dir PATH] [--pull]
 ```
 Behavior:
 * Creates a new project for one device, reached over serial or SSH. `NAME` is required — it's both the project's identity and, unless `--dir PATH` says otherwise, the directory it's created in (`./NAME`)
 * `cd` into the project directory before running any other command — they all expect to be run from inside it, the same way `git status` expects to be run from inside the repository rather than handed a path to one
-* Initializes a git repository there and makes the first commit (an empty `device.config`). Refuses to run if the target directory already holds a c2sync project, rather than overwriting it
+* Initializes a git repository there and makes the first commit (an empty `device.config`, plus `c2sync.toml` holding the connection info). Refuses to run if the target directory already holds a c2sync project, rather than overwriting it
 * Serial: `BAUDRATE` defaults to 9600, or to the global config's `baudrate` if set (see Configuration below)
 * SSH: `PORT` defaults to 22, or to the global config's `ssh_port` if set. Host keys are verified against your `~/.ssh/known_hosts`
+* `--pull` immediately fetches the device's current running config as the baseline — the same as running `c2sync pull` right afterward — so onboarding an already-configured device is one step instead of two, mirroring `git clone` doing an initial fetch for you. Without it, `init` alone just creates an empty `device.config`
 
 ### 2. Pull
 
@@ -262,11 +266,21 @@ Behavior:
 c2sync pull [--force|-f]
 ```
 Behavior:
-* Connects to the device, fetches the running config, and commits it as the new baseline — this is how you onboard a device that's already configured (`init` alone only creates an empty `device.config`)
+* Connects to the device, fetches the running config, and commits it as the new baseline — this is how you onboard a device that's already configured (`init` alone only creates an empty `device.config`, unless `--pull` was also given)
 * Also useful later to resync the baseline if the device changed outside of C2Sync
 * Refuses to run if you have unpushed local edits, unless `--force`/`-f` is passed to overwrite them — there's no `-y` here, since pull has no other prompt to skip; a flag that only means "overwrite my local edits" shouldn't be spelled the same as "don't ask me anything"
 
-### 3. Local Editing
+### 3. Fetch
+
+```
+c2sync fetch
+```
+Behavior:
+* Connects to the device, reads the running config, and reports how it differs from the local baseline (`device.config` at git `HEAD`) — `device.config`, staging, and local state are all left untouched either way
+* The read-only counterpart to `pull`: mirrors git's own `fetch` (look only) vs. `pull` (fetch and merge) split
+* Closes a real gap in `status`, which is deliberately offline and so can report `synced` even when the device has actually drifted out-of-band. Run `c2sync fetch` any time you want to check without committing to either side of the drift
+
+### 4. Local Editing
 
 The user edits `device.config`, right at the top level of the project directory, with the text editor of their choice, using normal Cisco IOS CLI syntax. Just delete a line to remove it — C2Sync parses the config into a real tree (via `ciscoconfparse2`) and generates the correct `no <command>` for you; you don't need to type the negation yourself, though it still works fine if you do.
 
@@ -300,7 +314,7 @@ interface GigabitEthernet1/0/1
  switchport nonegotiate
 ```
 
-### 4. Status
+### 5. Status
 
 ```
 c2sync status
@@ -310,18 +324,20 @@ Behavior:
 * Previews the exact CLI commands that `push` would send
 * Read-only — never connects to the device
 
-### 5. Push
+### 6. Push
 
 ```
-c2sync push [-y] [--force|-f] [--rollback-on-error]
+c2sync push [-y] [--rebase] [--rollback-on-error]
 
 Options:
     -y                   Push without an interactive confirmation prompt
-    --force, -f          Adopt out-of-band device changes without asking
+    --rebase             Adopt out-of-band device changes as the new baseline
+                         without asking, then replay your staged commands on
+                         top of it
     --rollback-on-error  Offer to undo a partially-applied push
 ```
 Behavior:
-* Reads the device's running config first and checks it still matches the baseline the staged commands were computed against — see below
+* Reads the device's running config first and checks it still matches the baseline the staged commands were computed against — see below (`c2sync fetch` runs this same check on demand, without pushing anything)
 * Displays the commands that will be sent, then pushes them if confirmed
 * Re-fetches the running config and commits it to the project's git repository — this becomes the new baseline for the next diff
 * If the device rejects a command partway, the commands before it stay on the device. C2Sync always re-reads the running config at that point and moves the baseline to match, so `status` shows only what's still outstanding and your edits are left alone — it does not undo the push
@@ -329,11 +345,11 @@ Behavior:
 
 **If the device changed outside C2Sync**, the staged commands describe a device that no longer exists. A line you deleted locally still becomes `no <that line>`, which on IOS clears whatever is actually there — so it can destroy a colleague's replacement for it, with nothing in the preview hinting at that. `push` therefore reads the device before showing you anything, and stops if it has drifted, printing what changed on it.
 
-Accepting adopts the device's current config as the new baseline and recomputes. Your edits in `device.config` are left untouched, the adoption is recorded as a git commit, and the preview you then approve is the truth. The recomputed commands will include undoing the out-of-band change, since your file doesn't contain it — that's the point: it happens either way, and this is the version where you see it first. To keep both sets of changes, merge them with `git` in the project directory before pushing.
+Accepting (`--rebase`, or confirming the prompt) adopts the device's current config as the new baseline and recomputes — your edits in `device.config` are replayed on top of it, not overwritten by it, which is what `--rebase` names. The adoption is recorded as a git commit, and the preview you then approve is the truth. The recomputed commands will include undoing the out-of-band change, since your file doesn't contain it — that's the point: it happens either way, and this is the version where you see it first. To keep both sets of changes, merge them with `git` in the project directory before pushing.
 
-`-y` doesn't stand in for that decision and never prompts for it: with `-y` and no `--force`, drift is a hard failure, so a CI job stops rather than pushing against a stale baseline.
+`-y` doesn't stand in for that decision and never prompts for it: with `-y` and no `--rebase`, drift is a hard failure, so a CI job stops rather than pushing against a stale baseline.
 
-### 6. Save
+### 7. Save
 
 ```
 c2sync save [-y]
@@ -343,7 +359,7 @@ Behavior:
 * Refuses to run while there are unpushed local edits — run `push` first
 * Records the save as a git commit (no file content changes, so it's an empty commit marking the milestone)
 
-### 7. Discard
+### 8. Discard
 
 ```
 c2sync discard
@@ -351,7 +367,7 @@ c2sync discard
 Behavior:
 * Reverts local edits back to the last confirmed push (`device.config` at git `HEAD`) and clears anything staged
 
-### 8. Revert
+### 9. Revert
 
 ```
 c2sync revert [COMMIT] [-y] [--force|-f]
