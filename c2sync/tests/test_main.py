@@ -15,7 +15,10 @@ def project(tmp_path, monkeypatch):
     # Isolate from whatever global config.toml might actually exist on the
     # machine running the tests.
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
-    main_module.init(['/dev/ttyUSB0'])
+    # --dir . puts the project directly in the already-isolated tmp_path,
+    # matching how a real user would already be cd'd into it - avoids every
+    # test needing its own chdir into a NAME-derived subdirectory.
+    main_module.init(['myproject', '/dev/ttyUSB0', '--dir', '.'])
     return get_project()
 
 
@@ -144,7 +147,7 @@ def test_init_uses_baudrate_from_global_config(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     with patch('c2sync.main.user_config.load', return_value={'baudrate': 115200}):
-        main_module.init(['/dev/ttyUSB0'])
+        main_module.init(['myproject', '/dev/ttyUSB0', '--dir', '.'])
 
     assert get_project().BAUDRATE == 115200
 
@@ -153,7 +156,7 @@ def test_init_cli_baudrate_overrides_global_config(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     with patch('c2sync.main.user_config.load', return_value={'baudrate': 115200}):
-        main_module.init(['/dev/ttyUSB0', '57600'])
+        main_module.init(['myproject', '/dev/ttyUSB0', '57600', '--dir', '.'])
 
     assert get_project().BAUDRATE == 57600
 
@@ -162,7 +165,7 @@ def test_init_ssh_creates_an_ssh_transport_project(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
 
-    main_module.init(['--ssh', '10.0.0.1', '2222'])
+    main_module.init(['myproject', '--ssh', '10.0.0.1', '2222', '--dir', '.'])
 
     project = get_project()
     assert project.TRANSPORT == 'ssh'
@@ -175,9 +178,96 @@ def test_init_ssh_defaults_port_to_22(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
 
-    main_module.init(['--ssh', '10.0.0.1'])
+    main_module.init(['myproject', '--ssh', '10.0.0.1', '--dir', '.'])
 
     assert get_project().SSH_PORT == 22
+
+
+# ------------------------------------------------------------------
+# init / project layout
+# ------------------------------------------------------------------
+
+def test_init_requires_a_name(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit):
+        main_module.init([])
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_init_rejects_a_name_containing_a_path_separator(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit):
+        main_module.init(['not/allowed', '/dev/ttyUSB0'])
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_init_rejects_dot_and_dotdot_as_a_name(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    for bad_name in ('.', '..'):
+        with pytest.raises(SystemExit):
+            main_module.init([bad_name, '/dev/ttyUSB0'])
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_init_creates_a_name_derived_subdirectory_by_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
+
+    main_module.init(['myrouter', '/dev/ttyUSB0'])
+
+    project_dir = tmp_path / 'myrouter'
+    assert project_dir.is_dir()
+    # device.config, .gitignore and .git are all visible at the top level -
+    # the whole point of this layout - while the operational scratch files
+    # are tucked away in .c2sync/.
+    assert (project_dir / 'device.config').is_file()
+    assert (project_dir / '.gitignore').is_file()
+    assert (project_dir / '.git').is_dir()
+    assert (project_dir / '.c2sync' / 'c2sync.config').is_file()
+    assert (project_dir / '.c2sync' / 'staging.txt').is_file()
+    assert (project_dir / '.c2sync' / 'state.json').is_file()
+
+
+def test_init_dir_override_creates_the_project_there_instead(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
+
+    target = tmp_path / 'elsewhere'
+    main_module.init(['myrouter', '/dev/ttyUSB0', '--dir', str(target)])
+
+    assert (target / 'device.config').is_file()
+    assert not (tmp_path / 'myrouter').exists()
+
+
+def test_init_refuses_to_overwrite_an_existing_project(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
+
+    main_module.init(['myrouter', '/dev/ttyUSB0', '--dir', '.'])
+    with open('device.config', 'w') as file:
+        file.write('interface Gi1/0/1\n')
+
+    with pytest.raises(SystemExit):
+        main_module.init(['myrouter', '/dev/ttyUSB0', '--dir', '.'])
+
+    # The existing project's edits must survive the refused re-init.
+    with open('device.config') as file:
+        assert file.read() == 'interface Gi1/0/1\n'
+
+
+def test_project_name_is_stored_and_reloaded(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
+
+    main_module.init(['myrouter', '/dev/ttyUSB0', '--dir', '.'])
+
+    assert get_project().NAME == 'myrouter'
 
 
 # ------------------------------------------------------------------
@@ -930,7 +1020,10 @@ def test_help_flag_after_a_command_prints_its_own_help_without_running_it(
 
     out = capsys.readouterr().out
     assert f'Usage: c2sync {command}' in out
-    assert not (tmp_path / '.c2sync').exists()
+    # Layout-agnostic: a real `init` run would land in a NAME-derived
+    # subdirectory, not tmp_path/.c2sync directly, so the meaningful check
+    # is that nothing at all got created in the isolated tmp_path.
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize('command', ALL_COMMANDS)
@@ -956,7 +1049,10 @@ def test_help_flag_is_caught_in_any_argument_position(command, monkeypatch, caps
     main_module.main()
 
     assert f'Usage: c2sync {command}' in capsys.readouterr().out
-    assert not (tmp_path / '.c2sync').exists()
+    # Layout-agnostic: a real `init` run would land in a NAME-derived
+    # subdirectory, not tmp_path/.c2sync directly, so the meaningful check
+    # is that nothing at all got created in the isolated tmp_path.
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_help_for_unknown_topic_falls_back_to_top_level_usage(monkeypatch, capsys):

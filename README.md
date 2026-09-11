@@ -3,6 +3,7 @@
 ## Overview
 
 C2Sync is a Python-based CLI tool that acts as a **middleman between a Cisco IOS device (over serial console or SSH) and a local git repository**.
+Essentially treating the device as a remote repository to push and pull its configuration from.
 
 The tool lets you:
 
@@ -18,17 +19,17 @@ Cisco IOS only, one device per project — a deliberate starting scope, not an o
 
 * Focus on simplicity, reliability, and CLI correctness
 * Simplify the experience of managing device config over serial or SSH
-* Every project is a real git repository — c2sync commits at defined lifecycle points (confirmed push/save), but doesn't reimplement `diff`/`log`/`branch`/PR review. Use your normal git tooling directly against the project directory, and push it to GitHub/GitLab for review like any other repo
+* Every project is a real git repository. c2sync commits at defined lifecycle points (confirmed push/save), but doesn't reimplement `diff`/`log`/`branch`/PR review. Use your normal git tooling directly against the project directory, and push it to GitHub/GitLab for review like any other repo
 * Users should already be comfortable with Cisco IOS CLI syntax
 
 ## Key Features
 
-Each `c2sync init` creates a project (`./.c2sync/`) for **one device**. The project directory is a real git repository:
+Each `c2sync init NAME ...` creates a project (`./NAME/` by default, or `--dir PATH`) for **one device**. The project directory is a real git repository, and only its operational scratch state (`.c2sync/`) is hidden — `device.config`, the file you actually edit, sits right at the top level next to `.git/`, the same way any other git-tracked file does:
 
 * `device.config` — the file you edit, tracked in git with one commit per confirmed push (plus an empty commit marking each save to startup-config)
-* Local edits are diffed against the last confirmed push — `device.config` as of git `HEAD` — on demand, not via a background watcher, the same model as `git status`
+* Local edits are diffed against the last confirmed push — `device.config` as of git `HEAD` — on demand, same as `git status`
 * Staged changes are rebuilt into Cisco IOS CLI commands that respect configuration context (see Local Editing below)
-* Pushes are verified against the device's own response; a rejected command aborts the whole push instead of partially applying
+* Pushes are verified against the device's own response; a rejected command aborts the rest of the push, but leaves successful commands on the device
 
 ## Installation
 
@@ -219,7 +220,7 @@ Usage:
 c2sync COMMAND [ARGS]
 
 Commands:
-    init      Start a project for one device in the current directory
+    init      Start a project for one device
     pull      Fetch the device's running config and make it the new baseline
     status    Show unpushed local edits and unsaved device changes
     push      Preview the staged commands and push them to the device
@@ -245,14 +246,15 @@ Each command is covered in detail under General workflow below.
 ### 1. Init
 
 ```
-c2sync init SERIAL_DEVICE [BAUDRATE]
-c2sync init --ssh HOST [PORT]
+c2sync init NAME SERIAL_DEVICE [BAUDRATE] [--dir PATH]
+c2sync init NAME --ssh HOST [PORT] [--dir PATH]
 ```
 Behavior:
-* Creates a new project in the current working directory (`./.c2sync/`) for one device, reached over serial or SSH
-* Initializes a git repository there and makes the first commit (an empty `device.config`)
+* Creates a new project for one device, reached over serial or SSH. `NAME` is required — it's both the project's identity and, unless `--dir PATH` says otherwise, the directory it's created in (`./NAME`)
+* `cd` into the project directory before running any other command — they all expect to be run from inside it, the same way `git status` expects to be run from inside the repository rather than handed a path to one
+* Initializes a git repository there and makes the first commit (an empty `device.config`). Refuses to run if the target directory already holds a c2sync project, rather than overwriting it
 * Serial: `BAUDRATE` defaults to 9600, or to the global config's `baudrate` if set (see Configuration below)
-* SSH: `PORT` defaults to 22, or to the global config's `ssh_port` if set. Host keys are verified against your `~/.ssh/known_hosts`, same as a plain `ssh` client — trust the device's key there first (e.g. `ssh user@host` once) if you haven't already, or C2Sync will refuse to connect
+* SSH: `PORT` defaults to 22, or to the global config's `ssh_port` if set. Host keys are verified against your `~/.ssh/known_hosts`
 
 ### 2. Pull
 
@@ -266,9 +268,9 @@ Behavior:
 
 ### 3. Local Editing
 
-The user edits `./.c2sync/device.config` with the text editor of their choice, using normal Cisco IOS CLI syntax. Just delete a line to remove it — C2Sync parses the config into a real tree (via `ciscoconfparse2`) and generates the correct `no <command>` for you; you don't need to type the negation yourself, though it still works fine if you do.
+The user edits `device.config`, right at the top level of the project directory, with the text editor of their choice, using normal Cisco IOS CLI syntax. Just delete a line to remove it — C2Sync parses the config into a real tree (via `ciscoconfparse2`) and generates the correct `no <command>` for you; you don't need to type the negation yourself, though it still works fine if you do.
 
-When `status`/`push` recompute staging, C2Sync diffs the parsed tree against the last confirmed baseline and writes the exact commands that would be sent to `./.c2sync/staging.txt`.
+When `status`/`push` recompute staging, C2Sync diffs the parsed tree against the last confirmed baseline and writes the exact commands that would be sent to `.c2sync/staging.txt` — one of the files you never need to open yourself.
 
 Example:
 ```
@@ -433,11 +435,11 @@ C2Sync is Cisco IOS only today. Supporting another vendor means more than swappi
 Considered, and deliberately not built: auto-pushing the project's git repo to a remote after a confirmed `push`/`save`. Git already solves this better than C2Sync could — add a `post-commit` hook and every commit C2Sync makes gets mirrored automatically, with no new credential surface (it reuses whatever git push auth you already have set up) and no risk of a push failure ever affecting a device push that already succeeded:
 
 ```bash
-cat > .c2sync/.git/hooks/post-commit <<'EOF'
+cat > .git/hooks/post-commit <<'EOF'
 #!/bin/sh
 git push
 EOF
-chmod +x .c2sync/.git/hooks/post-commit
+chmod +x .git/hooks/post-commit
 ```
 
 ## Disclaimer
