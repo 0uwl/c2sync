@@ -156,7 +156,7 @@ def init_project(project_config: Project) -> None:
     open(project_config.STAGING_FILE, 'w').close()
 
     with open(project_config.STATE_FILE, 'w') as state_file:
-        json.dump({'host_dirty': False, 'device_dirty': False}, state_file)
+        json.dump({'device_dirty': False}, state_file)
 
     # Only the scratch dir is local operational state - device.config and
     # c2sync.toml are both worth tracking/reviewing in git.
@@ -201,12 +201,12 @@ def _ensure_scratch_state(project: Project) -> None:
     start working, mirroring git itself needing no post-clone setup step:
     the tracked c2sync.toml + device.config + history is enough on its own.
 
-    host_dirty=False is correct by construction here, not just a
-    placeholder default: a freshly cloned working tree always matches
-    HEAD, the same reasoning init_project() already relies on.
-    device_dirty=False is a real unknown (the device's actual state is
-    unread at this point) rather than a verified fact - `c2sync fetch`
-    is the way to true that up.
+    Only device_dirty is stored. It is a real unknown at this point (the
+    device's actual state is unread) rather than a verified fact, and
+    nothing local can derive it - `c2sync fetch` is the way to true it up.
+    host_dirty needs no entry: it is derived from EDIT_FILE vs. git HEAD on
+    every load, which for a fresh checkout correctly computes clean without
+    anything having to assert it here.
 
     Safe to call unconditionally - the overwhelmingly common case (scratch
     state already exists) is a single os.path.exists check and nothing
@@ -219,7 +219,7 @@ def _ensure_scratch_state(project: Project) -> None:
     os.makedirs(SCRATCH_DIR)
     open(project.STAGING_FILE, 'w').close()
     with open(project.STATE_FILE, 'w') as state_file:
-        json.dump({'host_dirty': False, 'device_dirty': False}, state_file)
+        json.dump({'device_dirty': False}, state_file)
 
 
 def _write_toml(path: str, data: dict) -> None:

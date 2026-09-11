@@ -10,7 +10,13 @@ from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutExc
 from c2sync import Project, get_project, git_ops, init_project, user_config
 from c2sync.connector import DeviceInterface
 from c2sync.differ import Differ
-from c2sync.exceptions import ConfigApplyError, ConfigSaveError, HostKeyRejectedError, ProjectExistsError
+from c2sync.exceptions import (
+    ConfigApplyError,
+    ConfigReadError,
+    ConfigSaveError,
+    HostKeyRejectedError,
+    ProjectExistsError,
+)
 from c2sync.state_engine import StateEngine
 
 LOGGER = logging.getLogger(__name__)
@@ -266,27 +272,41 @@ def main():
         _print_help(command)
         return
 
-    match command:
-        case 'init':
-            init(command_arguments)
-        case 'pull':
-            pull(command_arguments)
-        case 'fetch':
-            fetch(command_arguments)
-        case 'status':
-            status(command_arguments)
-        case 'push':
-            push(command_arguments)
-        case 'save':
-            save(command_arguments)
-        case 'discard':
-            discard(command_arguments)
-        case 'revert':
-            revert(command_arguments)
-        case _:
-            LOGGER.error(f'Unknown command {command}')
-            print(USAGE, file=sys.stderr)
-            sys.exit(1)
+    # Any command that reads the device can find non-config text on the wire
+    # (console logging is the usual cause). The connector refuses to hand that
+    # back rather than letting it become the baseline; catching it here means
+    # every command reports the same actionable message instead of each call
+    # site growing its own handler. push's reconciliation has its own inner
+    # handler for this, which still wins - it has to leave the baseline alone
+    # and say so, not just exit.
+    try:
+        match command:
+            case 'init':
+                init(command_arguments)
+            case 'pull':
+                pull(command_arguments)
+            case 'fetch':
+                fetch(command_arguments)
+            case 'status':
+                status(command_arguments)
+            case 'push':
+                push(command_arguments)
+            case 'save':
+                save(command_arguments)
+            case 'discard':
+                discard(command_arguments)
+            case 'revert':
+                revert(command_arguments)
+            case _:
+                LOGGER.error(f'Unknown command {command}')
+                print(USAGE, file=sys.stderr)
+                sys.exit(1)
+    except ConfigReadError as e:
+        print(f'Could not read a usable running config from the device:\n{e}\n\n'
+              'Nothing was changed locally or on the device. This usually means the\n'
+              "device's own log messages are interleaving with command output - set\n"
+              '`logging buffered` and `no logging console` on the device, then retry.')
+        sys.exit(1)
 
 
 _INIT_USAGE = (
@@ -421,7 +441,6 @@ def _pull_running_config(project: Project, interface) -> None:
     git_ops.commit(project.PROJECT_DIR, [project.edit_file_relpath], f'c2sync pull: fetched from {project.target}')
 
     Differ(project).clear_staging()
-    StateEngine(project).mark_host_clean()
 
 
 def fetch(arguments: list):
@@ -553,7 +572,6 @@ def push(arguments: list):
         # and record that the device now has unsaved (running-config-only)
         # changes.
         Differ(project).clear_staging()
-        state_engine.mark_host_clean()
         state_engine.mark_device_dirty()
 
         # The device is now the source of truth again - refresh the file
@@ -615,7 +633,6 @@ def discard(arguments: list):
         file.write(baseline)
 
     Differ(project).clear_staging()
-    StateEngine(project).mark_host_clean()
     print('Discarded staged changes.')
 
 
@@ -709,7 +726,6 @@ def revert(arguments: list):
     # startup-config again until `c2sync save`.
     Differ(project).clear_staging()
     state_engine = StateEngine(project)
-    state_engine.mark_host_clean()
     state_engine.mark_device_dirty()
 
     print('\nReverted. Device has pending changes not yet saved to startup-config (run `c2sync save`).')
@@ -820,9 +836,19 @@ def _reconcile_after_failed_push(project: Project, interface, state_engine: Stat
         # Reconciliation is best-effort: losing the session here must not
         # mask the original rejection, but the local state is now known to
         # be untrustworthy and the user has to be told plainly.
+        #
+        # The case that matters most here is ConfigReadError (subsumed by
+        # the broad catch): the read came back, but as something that is
+        # not a config. Committing it anyway is what previously replaced a good
+        # baseline with the device's own error text, leaving `status`
+        # claiming the entire config was unpushed. Bailing out here keeps
+        # the last good baseline instead - stale, but true, and recoverable
+        # with the pull below.
         print(f'\nCould not re-read the running config to see what landed: {fetch_error}\n'
-              f'Local state may not match the device - check the device directly, '
-              f'then run `c2sync pull --force` to resync the baseline.')
+              f'The baseline was left untouched, so it still describes the device as it\n'
+              f'was before this push - which is now out of date, because some commands\n'
+              f'did land. Check the device directly, then run `c2sync pull --force` to\n'
+              f'resync the baseline.')
         return False
 
     landed = git_ops.commit_content(
@@ -918,22 +944,36 @@ def _require_project() -> Project:
 def _refresh_staging(project: Project) -> list[str]:
     """
     Recompute staging on demand from the baseline vs. the current edit
-    file, update host_dirty accordingly, and return the staged lines.
-    """
-    staged = Differ(project).refresh_staging_from_files()
+    file, and return the staged lines.
 
-    state_engine = StateEngine(project)
-    if staged:
-        state_engine.mark_host_dirty()
-    else:
-        state_engine.mark_host_clean()
+    Nothing is recorded about host_dirty here any more: it is derived from
+    the same two inputs this diff already reads (EDIT_FILE vs. device.config
+    at git HEAD), so any StateEngine built afterwards computes it directly.
+    That is what stops a command which never calls this - `pull`, `save`,
+    `revert` - from reading a stale flag and overwriting local edits.
+    """
+    Differ(project).refresh_staging_from_files()
 
     with open(project.STAGING_FILE) as file:
         return [line.rstrip('\n') for line in file if line.strip()]
 
 
 def _confirm(prompt: str) -> bool:
-    return input(f'{prompt} [y/N] ').strip().lower() == 'y'
+    """
+    Ask for confirmation, defaulting to no.
+
+    An unreadable stdin is treated as a decline rather than an error: every
+    caller is about to change a device, and "nobody was there to answer"
+    must never resolve to yes. Commands that need to run unattended have
+    -y for exactly this.
+    """
+    try:
+        return input(f'{prompt} [y/N] ').strip().lower() == 'y'
+    except (EOFError, OSError) as e:
+        LOGGER.debug(f'Confirmation prompt unavailable: {e}')
+        print('\nNo terminal to confirm on - treating as "no". Pass -y to proceed '
+              'without asking.', file=sys.stderr)
+        return False
 
 
 @contextmanager
@@ -967,9 +1007,22 @@ def _connect(project: Project) -> DeviceInterface:
     if username is not None and password is not None:
         secret = os.environ.get('C2SYNC_SECRET') or None
     else:
-        username = username or input('Username: ')
-        password = password or getpass.getpass('Password: ')
-        secret = getpass.getpass('Enable secret (leave blank if none): ') or None
+        try:
+            username = username or input('Username: ')
+            password = password or getpass.getpass('Password: ')
+            secret = getpass.getpass('Enable secret (leave blank if none): ') or None
+        except (EOFError, OSError) as e:
+            # No terminal to prompt on: stdin is closed, a pipe, or not a tty
+            # (getpass raises termios.error - an OSError - rather than
+            # EOFError when it cannot control echo). This is the CI case, and
+            # the fix is always the same, so say it rather than letting a
+            # traceback out.
+            LOGGER.debug(f'Credential prompt unavailable: {e}')
+            print('Need credentials, but there is no terminal to prompt on.\n'
+                  'Set C2SYNC_USERNAME and C2SYNC_PASSWORD (and C2SYNC_SECRET if the\n'
+                  'device has an enable secret), or run this from an interactive shell.',
+                  file=sys.stderr)
+            sys.exit(1)
 
     # Off by default: prompting to trust a never-seen host key is a
     # convenience, but it's a materially different (weaker) trust model

@@ -10,7 +10,7 @@ from netmiko import ConnectHandler
 from netmiko.exceptions import ConfigInvalidException, NetmikoTimeoutException
 
 from c2sync import Project
-from c2sync.exceptions import ConfigApplyError, ConfigSaveError, HostKeyRejectedError
+from c2sync.exceptions import ConfigApplyError, ConfigReadError, ConfigSaveError, HostKeyRejectedError
 
 LOGGER = logging.getLogger(__name__)
 
@@ -23,6 +23,19 @@ IOS_ERROR_PATTERN = r'%\s*(?:Invalid input|Incomplete command|Ambiguous command|
 # else (a prompt for confirmation, a permission error, no response) means the
 # device did not actually persist the config.
 IOS_SAVE_SUCCESS_PATTERN = r'\[OK\]'
+
+# IOS prints asynchronous syslog messages straight to the session whenever
+# `logging console` is on (the default) or `terminal monitor` is set. They can
+# land anywhere in command output - including spliced into the middle of a
+# running-config read - and are indistinguishable from config lines to a
+# parser. Matches a full message and the truncated tail of one cut off by the
+# end of a read ("*Sep 11 12:3").
+IOS_SYSLOG_LINE_PATTERN = re.compile(r'^\*?[A-Z][a-z]{2} {1,2}\d{1,2} \d{1,2}:\d{2}(:\d{2})?(\.\d+)?')
+
+# `show running-config` always terminates with a bare `end`. Everything after
+# it is session noise (the prompt we were echoed back, a trailing log line),
+# never config.
+IOS_CONFIG_TERMINATOR = 'end'
 
 KNOWN_HOSTS_PATH = os.path.expanduser('~/.ssh/known_hosts')
 
@@ -103,7 +116,19 @@ class DeviceInterface:
 
 
     def get_running_config(self) -> str:
-        return self.conn.send_command('show running-config brief')
+        """
+        Read the device's running config, with session noise removed.
+
+        Netmiko returns whatever was on the wire, and every caller here
+        treats that as the device's true state - `pull` writes it to
+        EDIT_FILE, drift detection diffs against it, and both push's
+        reconciliation paths commit it as the git baseline. So a read that
+        picked up a prompt or a syslog line does not merely look untidy: it
+        becomes config, and the next push tries to send it to the device.
+        Sanitize first, then refuse anything that still doesn't look like a
+        config rather than passing it on.
+        """
+        return _clean_running_config(self.conn.send_command('show running-config brief'))
 
 
     def apply_config(self, lines: list[str]) -> str:
@@ -117,7 +142,31 @@ class DeviceInterface:
         try:
             return self.conn.send_config_set(lines, error_pattern=IOS_ERROR_PATTERN)
         except ConfigInvalidException as e:
+            # The batch aborted mid-flight, so the session is still sitting in
+            # config mode with the device's rejection text unread. push's
+            # reconciliation re-reads the running config over this same
+            # session immediately afterwards; without resetting it first that
+            # read returns the leftover error text, which then gets committed
+            # as the baseline.
+            self._recover_session()
             raise ConfigApplyError(str(e)) from e
+
+
+    def _recover_session(self) -> None:
+        """
+        Put the session back at a usable exec prompt after a rejected command.
+
+        Best-effort on purpose: this runs while an error is already being
+        raised, and a failure to tidy up must never replace the rejection the
+        caller actually needs to see.
+        """
+        try:
+            self.conn.clear_buffer()
+            if self.conn.check_config_mode():
+                self.conn.exit_config_mode()
+            self.conn.find_prompt()
+        except Exception as e:
+            LOGGER.debug(f'Session recovery after a rejected command failed: {e}')
 
 
     def sync_config(self, lines: list[str]) -> str:
@@ -185,3 +234,53 @@ def _trust_new_host_key(host: str, port: int) -> None:
     with open(KNOWN_HOSTS_PATH, 'a') as file:
         file.write(line)
     print(f"Warning: Permanently added '{host}' ({server_key.get_name()}) to the list of known hosts.")
+
+
+def _clean_running_config(output: str) -> str:
+    """
+    Turn a raw `show running-config` read into just the config.
+
+    Two narrow rules, both aimed at session noise rather than at the config
+    itself:
+
+    - Drop asynchronous syslog lines wherever they appear. Filtering only the
+      tail is not enough - with `logging console` on, a message can arrive
+      mid-read and splice itself between two config lines.
+    - Keep nothing after the final `end`. That is where the config stops; a
+      trailing prompt or log line lives past it. The *last* `end` is the
+      terminator, so a banner body containing one is unaffected.
+
+    The `show` preamble (`Building configuration...`, `Current configuration :
+    N bytes`, the `! Last configuration change` comment) is deliberately left
+    alone: ciscoconfparse2 already absorbs it without producing diff lines,
+    and stripping it risks disturbing the version/hostname parse.
+
+    Raises ConfigReadError when there is no `end` at all. That is the only
+    validation, and it is deliberately the same fact the truncation above
+    depends on: without a terminator we cannot tell a complete config from
+    a read that was cut short, and every caller's next move is to treat
+    what it gets back as the device's state and commit it. A partial read
+    committed as the baseline is exactly as damaging as a noisy one. A
+    config of just `end` is legitimately empty (a blank device), and the
+    differ already treats it as such.
+    """
+    lines = [line for line in output.splitlines()
+             if not IOS_SYSLOG_LINE_PATTERN.match(line.strip())]
+
+    terminator = None
+    for index, line in enumerate(lines):
+        if line.strip() == IOS_CONFIG_TERMINATOR:
+            terminator = index
+
+    if terminator is None:
+        raise ConfigReadError(
+            'Device output did not contain a terminating `end`, so it is not a complete '
+            f'running config. Got {len(lines)} line(s), starting: {_preview(lines)!r}'
+        )
+
+    return '\n'.join(lines[:terminator + 1]) + '\n'
+
+
+def _preview(lines: list[str], limit: int = 2) -> str:
+    """First couple of lines of a bad read, for an error message."""
+    return ' / '.join(line.strip() for line in lines[:limit] if line.strip()) or '<empty>'

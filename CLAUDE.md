@@ -47,7 +47,9 @@ already built, even in places where it was never written down as a rule until no
   in `git log` instead of being erased.
 - **Refusing silent loss.** `pull`/`revert` both refuse to overwrite unpushed local
   edits unless explicitly forced — the same instinct behind git refusing a
-  non-fast-forward `pull` rather than silently discarding local commits.
+  non-fast-forward `pull` rather than silently discarding local commits. The flag they
+  check is *derived*, never cached, so the refusal holds whether or not `status`
+  happened to run first (see State tracking below).
 - **A project should survive a clone.** Connection info (`TRANSPORT`, `SERIAL_DEVICE`/
   `HOST`, etc.) is tracked in git via `c2sync.toml`, not left in gitignored scratch state
   — the same instinct behind git tracking everything a checkout needs to keep working,
@@ -138,7 +140,7 @@ myrouter/                 <- what you `cd` into; PROJECT_DIR is '.' from in here
 ├── .git/                  <- real git repo, git_ops.init() ran here
 └── .c2sync/               <- the only hidden part: pure operational scratch
     ├── staging.txt        <- STAGING_FILE, recomputed CLI commands, fully overwritten each check
-    └── state.json         <- STATE_FILE, {host_dirty, device_dirty}, see State tracking below
+    └── state.json         <- STATE_FILE, {device_dirty}, see State tracking below
 ```
 
 `device.config` is tracked in git; the baseline is `device.config` at git `HEAD`, not a
@@ -211,12 +213,13 @@ they never travel with a clone, on purpose (see the directory-layout intro above
 fresh `git clone` leaves a project with `c2sync.toml`/`device.config`/history but no
 `.c2sync/` yet. `get_project()` calls `_ensure_scratch_state()` on every load, which
 recreates `staging.txt` and `state.json` from scratch if `.c2sync/` doesn't exist -
-mirroring git itself needing no post-clone setup step beyond the clone. `host_dirty` is
-correctly initialized `False` here, not just a placeholder: a freshly cloned working tree
-always matches `HEAD` by construction, the same reasoning `init_project()` already relies
-on for a brand-new project. `device_dirty` is also initialized `False`, but that one's a
-real unknown rather than a verified fact - the device's actual state hasn't been read at
-clone time; `c2sync fetch` (see CLI surface below) is how an operator trues that up.
+mirroring git itself needing no post-clone setup step beyond the clone. Only
+`device_dirty` is written there (initialized `False`), and it's a real unknown rather
+than a verified fact - the device's actual state hasn't been read at clone time;
+`c2sync fetch` (see CLI surface below) is how an operator trues that up. `host_dirty`
+needs no entry at all: it's derived from `EDIT_FILE` vs. `HEAD` on every load (see State
+tracking below), which for a fresh checkout correctly computes clean without anything
+having to assert it.
 
 ### Module map
 
@@ -227,8 +230,8 @@ clone time; `c2sync fetch` (see CLI surface below) is how an operator trues that
 | `c2sync/differ.py` | `Differ` — real config-tree diff (`ciscoconfparse2`) → CLI commands |
 | `c2sync/git_ops.py` | Thin `git` subprocess wrapper — `init`/`commit`/`commit_content`/`commit_empty`/`show_at`/`show_at_head`/`resolve_rev` |
 | `c2sync/user_config.py` | Reads the optional global TOML preferences file — `load()`/`config_path()` |
-| `c2sync/state_engine.py` | `StateEngine` — `host_dirty`/`device_dirty` tracking |
-| `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigSaveError`, `HostKeyRejectedError`, `ProjectExistsError` |
+| `c2sync/state_engine.py` | `StateEngine` — derived `host_dirty` / persisted `device_dirty` |
+| `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigReadError`, `ConfigSaveError`, `HostKeyRejectedError`, `ProjectExistsError` |
 | `c2sync/main.py` | CLI entry point: `init` / `pull` / `fetch` / `status` / `push` / `save` / `discard` / `revert` |
 
 ### Diff → CLI command translation (`differ.py`)
@@ -275,10 +278,29 @@ able to clear `host_dirty` without touching `device_dirty`, and vice versa:
 - `device_dirty` — a push has been sent and confirmed, but not yet saved to
   startup-config.
 
+**They are stored differently on purpose, and this is load-bearing.** `host_dirty` is
+**derived** on every `StateEngine` construction, by diffing `EDIT_FILE` against the
+baseline; only `device_dirty` is persisted in `state.json`. The reason is that
+`host_dirty` is a question the files can always answer, so storing it only creates a
+cache — and it was a stale one. It used to be written by `_refresh_staging()`, which
+only `status` and `push` call, while `pull`/`save`/`revert` read the stored value to
+decide whether overwriting `EDIT_FILE` would destroy unpushed work. Editing
+`device.config` and running `pull` straight away therefore found a stale `False` and
+silently clobbered the edits — the exact silent loss the guard exists to prevent. A
+derived flag cannot go stale, and no new command can forget to refresh it. `device_dirty`
+stays persisted because nothing local can derive it: whether the device has
+running-config changes not yet written to startup-config is only knowable from what we
+last did to the device.
+
+The derivation uses `Differ.diff_lines`, **not** string equality, for the same reason
+drift detection does: the question is whether there are commands to send. A cosmetic
+edit that stages nothing is not unpushed work, and treating it as such would make `pull`
+refuse to run while `status` simultaneously reported nothing staged.
+
 `StateEngine.state.label` computes a single display string (`host pending changes` >
-`device pending changes` > `synced`) with `host_dirty` taking priority. Transitions are
-only ever driven by **confirmed** outcomes from `connector.py` (a Netmiko-verified push
-or save), never assumed on send — see next section.
+`device pending changes` > `synced`) with `host_dirty` taking priority. `device_dirty`
+transitions are only ever driven by **confirmed** outcomes from `connector.py` (a
+Netmiko-verified push or save), never assumed on send — see next section.
 
 ### Device transport (`connector.py`)
 
@@ -331,6 +353,26 @@ attacker who isn't on-path during the *first* connection - for a device being
 onboarded for the first time (a shared lab VLAN, a jump host, a compromised switch),
 that's exactly the moment a human verifying the fingerprint out-of-band actually
 matters.
+
+**Reads are sanitized and validated, not trusted.** `get_running_config()` does not
+hand back whatever Netmiko returned. With `logging console` on — the IOS default — the
+device emits asynchronous syslog messages straight into the session, which land in the
+middle of command output and are indistinguishable from config lines to a parser. On a
+real console this put `Switch#` and `*Sep 11 12:33:35.565` into `device.config`. Because
+the trailing fragment is cut wherever the read happened to stop, it differed on every
+read, so **every** subsequent `fetch`/`push` reported drift that did not exist — and
+`push` offered to send `no *Sep 11 12:3` to the device as a config command.
+
+`_clean_running_config()` therefore drops syslog-shaped lines wherever they appear (not
+just at the tail — an async message can splice itself between two config lines) and
+keeps nothing after the final `end`. The `show` preamble is deliberately left alone:
+`ciscoconfparse2` already absorbs it without producing diff lines. It then raises
+`ConfigReadError` if there is no `end` at all, which is the same fact the truncation
+depends on — without a terminator there is no way to tell a complete config from a read
+that was cut short, and a partial config committed as the baseline is exactly as
+damaging as a noisy one. A config of just `end` is legitimately a blank device. This
+matters because every caller treats the return value as the device's true state and
+commits it, so a bad read does not merely look untidy — it *becomes* the baseline.
 
 Two things this wrapper adds on top of raw Netmiko, transport-independent:
 
@@ -429,6 +471,19 @@ commands are in running-config, not startup-config). Reconciliation only ever re
 the device and writes locally, which is what makes it safe to do automatically; if the
 re-read itself fails, it says so and tells the user to `pull --force` rather than
 leaving them with silently wrong state.
+
+**The re-read is the dangerous part, and it is why `get_running_config()` validates.**
+`apply_config` aborts the batch mid-flight, which leaves the session sitting in config
+mode with the device's rejection text still unread. The re-read then happens over that
+same session immediately afterwards. On real hardware this returned the error text
+(`^` / `% Invalid input detected at '^' marker.`) where the running config should have
+been, and it was committed verbatim as the new baseline — replacing 242 lines with 2.
+`status` then listed the *entire* device config as outstanding, led by `no ^`, and the
+next push would have tried to send it. Two things prevent a repeat: `apply_config` now
+resets the session (`clear_buffer`, `exit_config_mode`) before raising, and
+`get_running_config()` refuses to return anything that isn't a config (see Device
+transport above). The existing "could not re-read" branch then does the right thing on
+its own — it keeps the last good baseline, which is stale but *true*, and says so.
 
 **Opt-in, via `push --rollback-on-error`:** `_rollback_after_failed_push()` diffs the
 live device against the baseline the push *started* from (captured as `pre_push_head`
@@ -577,6 +632,11 @@ password are resolved — a partially-set environment (or a config file with no
 `C2SYNC_PASSWORD` set) falls back to prompting for whatever's still missing, never
 half-prompts or hangs on stdin in CI. `C2SYNC_SECRET` is checked the same way as
 `C2SYNC_PASSWORD` but is optional either way (`None` if unset, prompted for otherwise).
+When it does need to prompt and there is no terminal to prompt on, it exits 1 naming the
+env vars to set, rather than letting `EOFError` (or the `termios.error` `getpass` raises
+when it can't control echo) out as a traceback — the same applies to `_confirm()`, which
+treats an unreadable stdin as a decline, since every one of its callers is about to
+write to a live device and "nobody was there to answer" must never resolve to yes.
 Passwords/enable-secrets are **never** read from the global config file or stored
 anywhere by c2sync itself — env vars are meant to be injected by the CI system's own
 secrets manager. Note `push -y` fails closed on out-of-band drift rather than

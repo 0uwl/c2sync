@@ -387,7 +387,36 @@ Behavior:
 2. `username` from the global config file (see Configuration below) — password and enable-secret are never read from there
 3. An interactive prompt for whatever's still missing
 
-For CI/non-interactive use (e.g. a merged PR triggering `c2sync push -y`), set `C2SYNC_USERNAME` and `C2SYNC_PASSWORD` from your CI system's own secrets manager. C2Sync never stores credentials itself, in this file or anywhere else.
+For CI/non-interactive use (e.g. a merged PR triggering `c2sync push -y`), set `C2SYNC_USERNAME` and `C2SYNC_PASSWORD` from your CI system's own secrets manager. C2Sync never stores credentials itself, in this file or anywhere else. If something is missing and there's no terminal to prompt on, the command exits 1 and names the variables to set rather than hanging or crashing.
+
+## Troubleshooting
+
+### "Could not read a usable running config from the device"
+
+Almost always the device's own log messages interleaving with command output. IOS sends syslog straight to the session when `logging console` is on (the default on a console connection) or `terminal monitor` is set on a VTY, and those lines arrive in the middle of `show running-config`:
+
+```
+end
+
+Switch#
+*Sep 11 12:33:35.565
+```
+
+C2Sync strips what it can recognise and refuses the read rather than storing something that isn't a config — an earlier version stored it, which made every later `fetch`/`push` report drift that didn't exist. On the device:
+
+```
+conf t
+ logging buffered 16384
+ no logging console
+end
+write memory
+```
+
+Log messages are still available with `show logging`. C2Sync deliberately does not change this setting for you: `fetch` is read-only by contract, and a dropped session would otherwise leave the device with logging disabled.
+
+### `configure terminal` is rejected / "Failed to enter configuration mode"
+
+The account is landing in privilege level 1. Check with `show privilege` — even with `username <name> privilege 15`, an `aaa authorization exec` line can put you at level 1 on login. C2Sync handles this itself (it runs `enable` when the session isn't already in enable mode), so this usually only shows up in your own scripts; set an enable secret in `C2SYNC_SECRET` if the device has one.
 
 ## Configuration
 

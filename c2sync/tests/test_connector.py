@@ -7,7 +7,7 @@ from netmiko.exceptions import ConfigInvalidException, NetmikoTimeoutException
 
 from c2sync import Project
 from c2sync.connector import DeviceInterface
-from c2sync.exceptions import ConfigApplyError, ConfigSaveError, HostKeyRejectedError
+from c2sync.exceptions import ConfigApplyError, ConfigReadError, ConfigSaveError, HostKeyRejectedError
 
 from constants import PROJECT
 
@@ -323,3 +323,132 @@ def test_serial_project_reaches_netmikos_real_serial_driver():
         interface = DeviceInterface(serial_project, username='admin', password='pw')
 
     assert type(interface.conn).__name__ == 'CiscoIosSerial'
+
+
+# ------------------------------------------------------------------
+# running-config reads: session noise and incomplete reads
+#
+# Everything here is a regression guard for a live-device failure. With
+# `logging console` on (the IOS default), a console read came back with the
+# prompt and a syslog line appended to the config. Those were written into
+# device.config, so every later fetch/push reported drift that did not
+# exist - and push offered to send `no *Sep 11 12:3` to the device as a
+# config command.
+# ------------------------------------------------------------------
+
+def _reading(output: str) -> str:
+    mock_conn = MagicMock()
+    mock_conn.send_command.return_value = output
+    return _make_interface(mock_conn).get_running_config()
+
+
+def test_running_config_drops_trailing_prompt_and_syslog_line():
+    raw = 'version 17.12\nhostname Switch\nend\n\nSwitch#\n*Sep 11 12:33:35.565\n'
+
+    assert _reading(raw) == 'version 17.12\nhostname Switch\nend\n'
+
+
+def test_running_config_drops_a_truncated_syslog_line():
+    """
+    The tail is cut wherever the read happened to stop, so the same device
+    yields a different trailing fragment every time - which is what made
+    the phantom drift permanent rather than a one-off.
+    """
+    raw = 'version 17.12\nhostname Switch\nend\nSwitch#\n*Sep 11 12:3'
+
+    assert _reading(raw) == 'version 17.12\nhostname Switch\nend\n'
+
+
+def test_running_config_drops_a_syslog_line_spliced_mid_config():
+    """
+    Async messages arrive whenever the device feels like it, including
+    between two config lines - so filtering only the tail is not enough.
+    """
+    raw = ('version 17.12\n'
+           '*Sep 11 12:33:35.565: %SYS-6-LOGOUT: User admin has exited tty session 0()\n'
+           'hostname Switch\nend\n')
+
+    assert _reading(raw) == 'version 17.12\nhostname Switch\nend\n'
+
+
+def test_running_config_keeps_an_end_inside_a_banner():
+    """
+    The terminator is the *last* `end`, so a banner body containing one is
+    not treated as the end of the config.
+    """
+    raw = 'hostname Switch\nbanner motd ^\nthe end\nend\n^\n!\nend\n'
+
+    assert _reading(raw) == raw
+
+
+def test_running_config_rejects_output_that_is_not_a_config():
+    """
+    The exact corruption seen live: after a rejected command the session was
+    still in config mode with the error unread, so this came back where the
+    running config should have been - and was committed as the baseline,
+    replacing 242 lines with 2.
+    """
+    raw = "                    ^\n% Invalid input detected at '^' marker.\n"
+
+    with pytest.raises(ConfigReadError):
+        _reading(raw)
+
+
+def test_running_config_rejects_a_read_that_stopped_early():
+    """
+    No terminating `end` means the read was cut short. Committing a partial
+    config as the baseline is as damaging as committing a noisy one - the
+    next status reports the missing remainder as local edits.
+    """
+    with pytest.raises(ConfigReadError):
+        _reading('version 17.12\nhostname Switch\ninterface Gi1/0/')
+
+
+def test_running_config_rejects_empty_output():
+    with pytest.raises(ConfigReadError):
+        _reading('')
+
+
+def test_empty_device_config_is_accepted():
+    """
+    A bare `end` is a legitimately blank device, not a failed read - and the
+    differ already treats it as equivalent to no config at all.
+    """
+    assert _reading('end\n') == 'end\n'
+
+
+# ------------------------------------------------------------------
+# session recovery after a rejected command
+# ------------------------------------------------------------------
+
+def test_rejected_command_resets_the_session_before_raising():
+    """
+    push re-reads the running config over this same session immediately
+    after the rejection, to work out what landed. Without leaving config
+    mode and clearing the unread error text first, that read returns the
+    error instead of the config.
+    """
+    mock_conn = MagicMock()
+    mock_conn.send_config_set.side_effect = ConfigInvalidException('bad command')
+    mock_conn.check_config_mode.return_value = True
+    interface = _make_interface(mock_conn)
+
+    with pytest.raises(ConfigApplyError):
+        interface.apply_config(['bogus-command'])
+
+    mock_conn.clear_buffer.assert_called()
+    mock_conn.exit_config_mode.assert_called()
+
+
+def test_failed_session_recovery_does_not_mask_the_rejection():
+    """
+    Recovery is tidying up while an error is already in flight; if it fails
+    too, the caller still has to see why the push was rejected.
+    """
+    mock_conn = MagicMock()
+    mock_conn.send_config_set.side_effect = ConfigInvalidException('bad command')
+    mock_conn.clear_buffer.side_effect = RuntimeError('session gone')
+    interface = _make_interface(mock_conn)
+
+    with pytest.raises(ConfigApplyError):
+        interface.apply_config(['bogus-command'])

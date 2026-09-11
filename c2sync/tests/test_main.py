@@ -1,3 +1,4 @@
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -27,6 +28,22 @@ def _write(path, lines):
         file.write('\n'.join(lines) + '\n')
 
 
+def _running_config(text):
+    """
+    Wrap fixture config text the way a device actually returns it.
+
+    `show running-config` always terminates with a bare `end`, and the
+    connector now relies on that to tell a complete read from one cut short
+    (see _clean_running_config). Fixtures that stop mid-config are not
+    something a device ever produces, so they'd only be testing a state
+    that can't happen. `end` is transparent to the differ - diffing '' to
+    'end' yields no commands - so adding it changes no diff expectations.
+    """
+    if text.strip().splitlines()[-1:] == ['end']:
+        return text
+    return text + 'end\n' if text.endswith('\n') or not text else text + '\nend\n'
+
+
 def _device_mock(config_after_push, config_before_push=''):
     """
     A mock that answers `show running-config` with the device's *current*
@@ -40,10 +57,10 @@ def _device_mock(config_after_push, config_before_push=''):
     """
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
-    state = {'config': config_before_push}
+    state = {'config': _running_config(config_before_push)}
 
     def _apply(lines, **kwargs):
-        state['config'] = config_after_push
+        state['config'] = _running_config(config_after_push)
         return 'ok'
 
     mock_conn.send_config_set.side_effect = _apply
@@ -272,7 +289,7 @@ def test_init_pull_flag_onboards_an_existing_device_in_one_step(tmp_path, monkey
 
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
-    mock_conn.send_command.return_value = 'hostname Router1\ninterface Gi1/0/1\n'
+    mock_conn.send_command.return_value = _running_config('hostname Router1\ninterface Gi1/0/1\n')
 
     with patch('c2sync.connector.ConnectHandler', return_value=mock_conn), \
          patch('builtins.input', side_effect=['admin']), \
@@ -280,13 +297,13 @@ def test_init_pull_flag_onboards_an_existing_device_in_one_step(tmp_path, monkey
         main_module.init(['myrouter', '/dev/ttyUSB0', '--dir', '.', '--pull'])
 
     with open('device.config') as file:
-        assert file.read() == 'hostname Router1\ninterface Gi1/0/1\n'
+        assert file.read() == _running_config('hostname Router1\ninterface Gi1/0/1\n')
 
     project = get_project()
     assert StateEngine(project).state.host_dirty is False
     # The pulled config is the git baseline already - a bare device.config
     # from `init` alone would still be an empty-string baseline instead.
-    assert git_ops.show_at_head(project.PROJECT_DIR, 'device.config') == 'hostname Router1\ninterface Gi1/0/1\n'
+    assert git_ops.show_at_head(project.PROJECT_DIR, 'device.config') == _running_config('hostname Router1\ninterface Gi1/0/1\n')
 
 
 def test_init_without_pull_flag_still_creates_an_empty_baseline(tmp_path, monkeypatch):
@@ -317,14 +334,14 @@ def test_project_name_is_stored_and_reloaded(tmp_path, monkeypatch):
 def test_pull_fetches_and_commits_running_config(project):
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
-    mock_conn.send_command.return_value = 'hostname Router1\ninterface Gi1/0/1\n'
+    mock_conn.send_command.return_value = _running_config('hostname Router1\ninterface Gi1/0/1\n')
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
         main_module.pull([])
 
     with open(project.EDIT_FILE) as file:
-        assert file.read() == 'hostname Router1\ninterface Gi1/0/1\n'
+        assert file.read() == _running_config('hostname Router1\ninterface Gi1/0/1\n')
 
     assert StateEngine(project).state.host_dirty is False
 
@@ -369,14 +386,14 @@ def test_pull_overwrites_host_dirty_edits_with_force(project):
 
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
-    mock_conn.send_command.return_value = 'hostname Router1\n'
+    mock_conn.send_command.return_value = _running_config('hostname Router1\n')
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
         main_module.pull(['--force'])
 
     with open(project.EDIT_FILE) as file:
-        assert file.read() == 'hostname Router1\n'
+        assert file.read() == _running_config('hostname Router1\n')
     assert StateEngine(project).state.host_dirty is False
 
 
@@ -386,7 +403,7 @@ def test_pull_short_dash_f_also_overwrites_host_dirty_edits(project):
 
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
-    mock_conn.send_command.return_value = 'hostname Router1\n'
+    mock_conn.send_command.return_value = _running_config('hostname Router1\n')
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
@@ -404,7 +421,7 @@ def test_fetch_reports_no_drift_when_device_matches_baseline(project, capsys):
 
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
-    mock_conn.send_command.return_value = 'interface Gi1/0/1\n description Server\n'
+    mock_conn.send_command.return_value = _running_config('interface Gi1/0/1\n description Server\n')
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
@@ -430,7 +447,7 @@ def test_fetch_reports_drift_without_touching_any_local_state(project, capsys):
 
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
-    mock_conn.send_command.return_value = 'interface Gi1/0/1\n description Colleague\n'
+    mock_conn.send_command.return_value = _running_config('interface Gi1/0/1\n description Colleague\n')
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
@@ -530,7 +547,7 @@ def test_push_partial_push_moves_baseline_to_what_actually_landed(project):
     # '' is the drift check reading a device that still matches the empty
     # baseline; partial_live is the reconciliation reading it afterwards.
     mock_conn.send_config_set.side_effect = ConfigInvalidException('bad command')
-    mock_conn.send_command.side_effect = ['', partial_live]
+    mock_conn.send_command.side_effect = [_running_config(''), _running_config(partial_live)]
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
@@ -538,7 +555,7 @@ def test_push_partial_push_moves_baseline_to_what_actually_landed(project):
             main_module.push(['-y'])
 
     # The baseline is now what the device actually has...
-    assert git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) == partial_live
+    assert git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) == _running_config(partial_live)
     # ...while the user's edits are untouched.
     with open(project.EDIT_FILE) as file:
         assert 'bogus-command' in file.read()
@@ -560,6 +577,12 @@ def test_push_rejected_first_command_leaves_state_intact(project):
     The other half of the same path: when nothing landed, the baseline must
     not move and the device must not be marked dirty.
     """
+    # Seed a baseline the mock device can return verbatim. A freshly-init'd
+    # project's baseline is empty, which no real device ever reports - and
+    # "the device still matches the baseline" is the whole premise here.
+    git_ops.commit_content(
+        project.PROJECT_DIR, project.edit_file_relpath,
+        _running_config('interface Gi1/0/1\n'), 'seed baseline')
     _write(project.EDIT_FILE, ['interface Gi1/0/1', ' bogus-command'])
 
     baseline_before = git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath)
@@ -568,7 +591,7 @@ def test_push_rejected_first_command_leaves_state_intact(project):
     mock_conn.check_enable_mode.return_value = True
     mock_conn.send_config_set.side_effect = ConfigInvalidException('bad command')
     # Device is unchanged - the first command was the rejected one.
-    mock_conn.send_command.return_value = baseline_before
+    mock_conn.send_command.return_value = _running_config(baseline_before)
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
@@ -578,7 +601,7 @@ def test_push_rejected_first_command_leaves_state_intact(project):
     state = StateEngine(project).state
     assert state.host_dirty is True
     assert state.device_dirty is False
-    assert git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) == baseline_before
+    assert git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) == _running_config(baseline_before)
 
     with open(project.STAGING_FILE) as file:
         assert 'bogus-command' in file.read()
@@ -594,7 +617,7 @@ def test_push_does_not_roll_back_without_the_flag(project):
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
     mock_conn.send_config_set.side_effect = ConfigInvalidException('bad command')
-    mock_conn.send_command.side_effect = ['', 'interface Gi1/0/1\n shutdown\n!\n']
+    mock_conn.send_command.side_effect = [_running_config(''), _running_config('interface Gi1/0/1\n shutdown\n!\n')]
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
@@ -616,10 +639,10 @@ def test_push_rollback_on_error_pushes_device_back_to_pre_push_baseline(project)
     # First push is rejected; the rollback push that follows succeeds.
     mock_conn.send_config_set.side_effect = [ConfigInvalidException('bad command'), 'ok']
     mock_conn.send_command.side_effect = [
-        baseline_before,   # drift check: device still matches the baseline
-        partial_live,      # reconciliation: what actually landed
-        partial_live,      # rollback: live config to diff against the baseline
-        baseline_before,   # rollback: state after the correction was applied
+        _running_config(baseline_before),   # drift check: device still matches the baseline
+        _running_config(partial_live),      # reconciliation: what actually landed
+        _running_config(partial_live),      # rollback: live config to diff against the baseline
+        _running_config(baseline_before),   # rollback: state after the correction was applied
     ]
 
     patches = _mocked_connect(mock_conn)
@@ -633,7 +656,7 @@ def test_push_rollback_on_error_pushes_device_back_to_pre_push_baseline(project)
     assert any('no ' in line for line in rollback_lines)
 
     # Baseline records the recovered device, edits still untouched.
-    assert git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) == baseline_before
+    assert git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) == _running_config(baseline_before)
     with open(project.EDIT_FILE) as file:
         assert 'bogus-command' in file.read()
 
@@ -656,7 +679,7 @@ def test_push_rollback_on_error_asks_before_pushing_the_correction(project):
     mock_conn.check_enable_mode.return_value = True
     live = 'interface Gi1/0/1\n shutdown\n!\n'
     mock_conn.send_config_set.side_effect = ConfigInvalidException('bad command')
-    mock_conn.send_command.side_effect = ['', live, live]
+    mock_conn.send_command.side_effect = [_running_config(''), _running_config(live), _running_config(live)]
 
     with patch('c2sync.connector.ConnectHandler', return_value=mock_conn), \
          patch('builtins.input', side_effect=['admin', 'y', 'n']), \
@@ -682,7 +705,7 @@ def test_push_detects_out_of_band_change_and_refuses_under_dash_y(project):
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
     # Someone else changed the description on the console.
-    mock_conn.send_command.return_value = 'interface Gi1/0/1\n description Colleague\n'
+    mock_conn.send_command.return_value = _running_config('interface Gi1/0/1\n description Colleague\n')
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
@@ -701,7 +724,7 @@ def test_push_declining_the_drift_prompt_sends_nothing(project):
 
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
-    mock_conn.send_command.return_value = 'interface Gi1/0/1\n description Colleague\n'
+    mock_conn.send_command.return_value = _running_config('interface Gi1/0/1\n description Colleague\n')
 
     with patch('c2sync.connector.ConnectHandler', return_value=mock_conn), \
          patch('builtins.input', side_effect=['admin', 'n']), \
@@ -775,7 +798,7 @@ def test_push_drift_that_already_matches_edits_sends_nothing(project):
 
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
-    mock_conn.send_command.return_value = 'interface Gi1/0/1\n description Mine\n'
+    mock_conn.send_command.return_value = _running_config('interface Gi1/0/1\n description Mine\n')
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
@@ -872,8 +895,8 @@ def test_revert_pushes_diff_between_live_config_and_head_by_default(project):
     revert_conn.check_enable_mode.return_value = True
     revert_conn.send_config_set.return_value = 'interface Gi1/0/1\n shutdown\nend'
     revert_conn.send_command.side_effect = [
-        'interface Gi1/0/1\n',
-        'interface Gi1/0/1\n shutdown\n',
+        _running_config('interface Gi1/0/1\n'),
+        _running_config('interface Gi1/0/1\n shutdown\n'),
     ]
 
     patches = _mocked_connect(revert_conn)
@@ -884,9 +907,9 @@ def test_revert_pushes_diff_between_live_config_and_head_by_default(project):
     assert any('shutdown' in line for line in pushed_lines)
 
     with open(project.EDIT_FILE) as file:
-        assert file.read() == 'interface Gi1/0/1\n shutdown\n'
+        assert file.read() == _running_config('interface Gi1/0/1\n shutdown\n')
 
-    assert git_ops.show_at_head(project.PROJECT_DIR, 'device.config') == 'interface Gi1/0/1\n shutdown\n'
+    assert git_ops.show_at_head(project.PROJECT_DIR, 'device.config') == _running_config('interface Gi1/0/1\n shutdown\n')
 
     state = StateEngine(project).state
     assert state.host_dirty is False
@@ -906,8 +929,8 @@ def test_revert_to_an_explicit_older_commit(project):
     revert_conn.check_enable_mode.return_value = True
     revert_conn.send_config_set.return_value = 'ok'
     revert_conn.send_command.side_effect = [
-        'interface Gi1/0/1\n description LATER\n',
-        'interface Gi1/0/1\n description GOOD\n',
+        _running_config('interface Gi1/0/1\n description LATER\n'),
+        _running_config('interface Gi1/0/1\n description GOOD\n'),
     ]
 
     patches = _mocked_connect(revert_conn)
@@ -916,7 +939,7 @@ def test_revert_to_an_explicit_older_commit(project):
 
     pushed_lines = revert_conn.send_config_set.call_args[0][0]
     assert any('description GOOD' in line for line in pushed_lines)
-    assert git_ops.show_at_head(project.PROJECT_DIR, 'device.config') == 'interface Gi1/0/1\n description GOOD\n'
+    assert git_ops.show_at_head(project.PROJECT_DIR, 'device.config') == _running_config('interface Gi1/0/1\n description GOOD\n')
 
 
 def test_revert_unresolvable_commit_exits_without_connecting(project):
@@ -930,7 +953,7 @@ def test_revert_nothing_to_revert_when_live_matches_target(project):
     # HEAD (from init) is an empty device.config.
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
-    mock_conn.send_command.return_value = ''
+    mock_conn.send_command.return_value = _running_config('')
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
@@ -949,7 +972,7 @@ def test_revert_device_rejects_leaves_git_and_state_untouched(project):
 
     revert_conn = MagicMock()
     revert_conn.check_enable_mode.return_value = True
-    revert_conn.send_command.return_value = 'interface Gi1/0/1\n'
+    revert_conn.send_command.return_value = _running_config('interface Gi1/0/1\n')
     revert_conn.send_config_set.side_effect = ConfigInvalidException('bad command')
 
     patches = _mocked_connect(revert_conn)
@@ -967,7 +990,7 @@ def test_revert_prompts_and_aborts_without_dash_y(project):
 
     revert_conn = MagicMock()
     revert_conn.check_enable_mode.return_value = True
-    revert_conn.send_command.return_value = 'interface Gi1/0/1\n'
+    revert_conn.send_command.return_value = _running_config('interface Gi1/0/1\n')
 
     patches = _mocked_connect(revert_conn)
     with patches[0], patches[2], patch('builtins.input', side_effect=['admin', 'n']):
@@ -1004,8 +1027,8 @@ def test_revert_overwrites_host_dirty_edits_with_force(project):
     revert_conn.check_enable_mode.return_value = True
     revert_conn.send_config_set.return_value = 'ok'
     revert_conn.send_command.side_effect = [
-        'interface Gi1/0/1\n',
-        'interface Gi1/0/1\n shutdown\n',
+        _running_config('interface Gi1/0/1\n'),
+        _running_config('interface Gi1/0/1\n shutdown\n'),
     ]
 
     patches = _mocked_connect(revert_conn)
@@ -1026,8 +1049,8 @@ def test_revert_short_dash_f_also_overwrites_host_dirty_edits(project):
     revert_conn.check_enable_mode.return_value = True
     revert_conn.send_config_set.return_value = 'ok'
     revert_conn.send_command.side_effect = [
-        'interface Gi1/0/1\n',
-        'interface Gi1/0/1\n shutdown\n',
+        _running_config('interface Gi1/0/1\n'),
+        _running_config('interface Gi1/0/1\n shutdown\n'),
     ]
 
     patches = _mocked_connect(revert_conn)
@@ -1046,7 +1069,7 @@ def test_revert_force_alone_does_not_skip_the_push_confirmation(project):
 
     revert_conn = MagicMock()
     revert_conn.check_enable_mode.return_value = True
-    revert_conn.send_command.return_value = 'interface Gi1/0/1\n'
+    revert_conn.send_command.return_value = _running_config('interface Gi1/0/1\n')
 
     patches = _mocked_connect(revert_conn)
     with patches[0], patches[2], patch('builtins.input', side_effect=['admin', 'n']):
@@ -1168,3 +1191,145 @@ def test_unknown_command_exits_nonzero_with_usage_on_stderr(monkeypatch, capsys)
     captured = capsys.readouterr()
     assert 'Usage:' in captured.err
     assert 'Usage:' not in captured.out
+
+
+# ------------------------------------------------------------------
+# guards that read host_dirty
+#
+# Regression guards for a live-device failure: host_dirty used to be a
+# persisted flag refreshed only by `status`/`push`, so editing device.config
+# and running `pull` straight afterwards found a stale "clean" and silently
+# overwrote the edits. Each test below edits the file and runs the command
+# immediately - never calling status first - because that ordering is the
+# whole bug.
+# ------------------------------------------------------------------
+
+def _stale_clean_state(project):
+    """Persist the state an older c2sync would have left behind."""
+    with open(project.STATE_FILE, 'w') as file:
+        json.dump({'host_dirty': False, 'device_dirty': False}, file)
+
+
+def test_pull_refuses_to_clobber_edits_made_since_the_last_status(project, capsys):
+    _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Unpushed'])
+    _stale_clean_state(project)
+
+    mock_conn = _device_mock('interface Gi1/0/1\n description Server\n')
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        with pytest.raises(SystemExit):
+            main_module.pull([])
+
+    with open(project.EDIT_FILE) as file:
+        assert 'description Unpushed' in file.read()
+    assert 'unpushed local edits' in capsys.readouterr().out
+
+
+def test_pull_force_still_overwrites_those_edits(project):
+    _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Unpushed'])
+    _stale_clean_state(project)
+
+    mock_conn = _device_mock('interface Gi1/0/1\n description Server\n',
+                             config_before_push='interface Gi1/0/1\n description Server\n')
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.pull(['--force'])
+
+    with open(project.EDIT_FILE) as file:
+        assert 'description Unpushed' not in file.read()
+
+
+def test_revert_refuses_to_clobber_edits_made_since_the_last_status(project, capsys):
+    _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Unpushed'])
+    _stale_clean_state(project)
+
+    with patch('c2sync.connector.ConnectHandler') as mock_handler:
+        with pytest.raises(SystemExit):
+            main_module.revert(['-y'])
+        # Refused before opening a session at all.
+        mock_handler.assert_not_called()
+
+    with open(project.EDIT_FILE) as file:
+        assert 'description Unpushed' in file.read()
+    assert 'unpushed local edits' in capsys.readouterr().out
+
+
+def test_save_refuses_while_edits_are_unpushed(project, capsys):
+    _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Unpushed'])
+    _stale_clean_state(project)
+
+    with patch('c2sync.connector.ConnectHandler') as mock_handler:
+        with pytest.raises(SystemExit):
+            main_module.save(['-y'])
+        mock_handler.assert_not_called()
+
+    assert 'unpushed local edits' in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------
+# failed push: the baseline must survive an unreadable re-read
+# ------------------------------------------------------------------
+
+def test_failed_push_keeps_the_baseline_when_the_reread_is_not_a_config(project, capsys):
+    """
+    The worst failure found on real hardware. After a rejected command the
+    session was still in config mode, so reconciliation's re-read returned
+    the device's error text - which was committed as the baseline, replacing
+    242 lines with 2. `status` then listed the entire config as outstanding,
+    led by `no ^`.
+
+    The connector now refuses to return that; this asserts push leaves the
+    last good baseline in place instead of committing whatever came back.
+    """
+    _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Server', ' bogus-command'])
+
+    baseline_before = git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath)
+
+    mock_conn = MagicMock()
+    mock_conn.check_enable_mode.return_value = True
+    mock_conn.send_config_set.side_effect = ConfigInvalidException('bad command')
+    mock_conn.send_command.side_effect = [
+        baseline_before,                                    # drift check: device matches
+        "                    ^\n% Invalid input detected at '^' marker.\n",  # the bad re-read
+    ]
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        with pytest.raises(SystemExit):
+            main_module.push(['-y'])
+
+    assert git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) == baseline_before
+
+    output = capsys.readouterr().out
+    assert 'pull --force' in output
+
+
+# ------------------------------------------------------------------
+# no terminal to prompt on
+# ------------------------------------------------------------------
+
+def test_missing_credentials_without_a_tty_exits_cleanly(project, monkeypatch, capsys):
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
+    monkeypatch.delenv('C2SYNC_USERNAME', raising=False)
+    monkeypatch.delenv('C2SYNC_PASSWORD', raising=False)
+
+    with patch('builtins.input', side_effect=EOFError()):
+        with pytest.raises(SystemExit) as exit_info:
+            main_module.push(['-y'])
+
+    assert exit_info.value.code == 1
+    assert 'C2SYNC_USERNAME' in capsys.readouterr().err
+
+
+def test_confirmation_without_a_tty_declines_rather_than_proceeding(project):
+    """
+    "Nobody was there to answer" must never resolve to yes - these prompts
+    guard writes to a live device.
+    """
+    with patch('builtins.input', side_effect=EOFError()):
+        assert main_module._confirm('Proceed?') is False
