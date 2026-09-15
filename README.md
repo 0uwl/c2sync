@@ -484,6 +484,14 @@ EOF
 chmod +x .git/hooks/post-commit
 ```
 
+### VS Code extension
+
+**Phase 1, already true today, no extension needed:** when a `push` merge conflict leaves `<<<<<<< / ||||||| / ======= / >>>>>>>` markers in `device.config` (see Push above), that's standard git conflict-marker syntax — the exact format `git merge-file` produces. VS Code's built-in editor recognizes that format in *any* open file and shows inline "Accept Current Change / Accept Incoming Change / Accept Both Changes / Compare Changes" actions, regardless of whether the file is part of an actual git operation. Opening `device.config` in VS Code during a pending conflict already gets this, today, for free.
+
+**Phase 2, planned:** a small, genuinely optional VS Code extension wrapping the CLI — a status bar indicator for `host pending changes` / `device pending changes` / `merge conflict pending`, one-click `pull`/`fetch`/`push`/`discard`, and syntax highlighting for `device.config`. It stays thin on purpose: the extension talks to the same `c2sync` CLI a terminal user would, never the other way around, so the CLI keeps working exactly as it does now with no extension installed, and nothing about the project format (`c2sync.toml`, `device.config`, the git repo) becomes VS Code-specific.
+
+**Stretch goal, not yet scoped:** VS Code also has a richer, visual 3-way Merge Editor beyond the inline markers above. Wiring into it properly would mean giving `push` a real git-level conflict (actual unmerged index stages + `MERGE_HEAD` in `PROJECT_DIR`, rather than today's `git_ops.merge_file()` working on loose temp files) so VS Code's own built-in git integration detects and opens it the same way it does for a normal `git merge` conflict — no private VS Code API involved. Deliberately not the alternative: VS Code's merge editor has no stable, documented way for an extension to open it directly on an arbitrary file (the closest such request, a `git mergetool`-style CLI flag, was closed by the VS Code team as not planned), only an internal, unsupported command that other extensions rely on at their own risk. That's a bigger design question than Phase 2 - how much closer that pulls C2Sync's git integration toward modeling the device as an actual git remote - so it's left for a dedicated pass later rather than decided here.
+
 ## Disclaimer
 * This tool assumes familiarity with network device CLI. You must adhere to Cisco IOS' configuration syntax
 * The tool does not validate commands before sending. You must review the preview yourself before confirming a `push`

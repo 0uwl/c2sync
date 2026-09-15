@@ -900,6 +900,20 @@ the user-facing write-up of what each would involve.
   nothing catches a command that is syntactically valid but operationally destructive,
   such as shutting the interface the session rides on. `c2sync revert` is today's
   recovery path, which is mitigation after the fact rather than prevention.
+- **VS Code extension.** A thin optional wrapper over the CLI (status bar state, one-click
+  `pull`/`fetch`/`push`/`discard`, `device.config` syntax highlighting) — never a second
+  way to drive a project, always calling the same `c2sync` a terminal user would. Phase 1
+  needs no extension at all: `push`'s merge conflict markers (see Out-of-band drift check
+  above) are already standard git format, which VS Code's built-in editor already
+  recognizes in any file with inline accept/reject actions. A deeper integration with
+  VS Code's richer, visual Merge Editor is a wanted stretch goal, deliberately deferred —
+  it has no stable, documented way for an extension to open it on an arbitrary file (a
+  `git mergetool`-style CLI flag request was closed by the VS Code team as not planned;
+  the only working path is a private, unsupported command), so doing it properly would
+  mean first giving `push` a real git-level conflict (actual unmerged index stages) for
+  VS Code's own git integration to detect — a bigger architectural step than today's
+  side-effect-free `git_ops.merge_file()`, and one worth its own design pass rather than
+  deciding here. See `README.md` for the user-facing version.
 
 ## Docs drift to be aware of
 
