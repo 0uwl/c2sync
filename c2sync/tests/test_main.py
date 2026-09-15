@@ -362,6 +362,25 @@ def test_pull_refuses_when_host_dirty_without_force(project):
         mock_handler.assert_not_called()
 
 
+def test_pull_refuses_safely_with_unresolved_conflict_markers_pending(project):
+    """
+    pull reads StateEngine(project).state.host_dirty directly - it never
+    calls _refresh_staging(), so it needs host_dirty's own conflict-marker
+    guard (see state_engine.py) rather than main.py's. Without it, this
+    would hand raw marker text to ciscoconfparse2 instead of refusing
+    cleanly, the same hazard _refresh_staging() guards against for
+    status/push.
+    """
+    _write(project.EDIT_FILE, [
+        '<<<<<<< your edits', 'description Mine', '=======', 'description Colleague', '>>>>>>> device',
+    ])
+
+    with patch('c2sync.connector.ConnectHandler') as mock_handler:
+        with pytest.raises(SystemExit):
+            main_module.pull([])
+        mock_handler.assert_not_called()
+
+
 def test_pull_dash_y_does_not_overwrite_host_dirty_edits(project):
     """
     pull has no other prompt -y would otherwise skip, so unlike
@@ -824,7 +843,13 @@ def test_push_drift_that_already_matches_edits_sends_nothing(project):
     leaves nothing to push - that's a success, not an error.
     """
     _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
-    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Mine'])
+    # Baseline ends with 'end' (a real device read always does - see
+    # _running_config), so the local edit has to keep it too: dropping it
+    # here would make EDIT_FILE disagree with the device on a line neither
+    # side actually meant to touch, which git_ops.merge_file() (being plain
+    # text, not IOS-aware) can genuinely see as a real conflicting hunk
+    # adjacent to the one line that did change.
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Mine', 'end'])
 
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True

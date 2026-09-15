@@ -304,6 +304,19 @@ drift detection does: the question is whether there are commands to send. A cosm
 edit that stages nothing is not unpushed work, and treating it as such would make `pull`
 refuse to run while `status` simultaneously reported nothing staged.
 
+**`_compute_host_dirty()` checks for unresolved merge conflict markers before calling
+`Differ.diff_lines` at all** (via `Differ.has_conflict_markers()`, a static method
+alongside `diff_lines`) — returning `True` immediately rather than ever handing marker
+text to `ciscoconfparse2`. This matters specifically *because* `host_dirty` is now
+derived on every construction: `_refresh_staging()` (see the `MergeConflictError` guard
+under Out-of-band drift check below) already refuses to parse a conflicted `EDIT_FILE`,
+but `pull`/`revert`/`save` read `StateEngine(project).state.host_dirty` directly and
+never call `_refresh_staging()` at all — so without this second guard, running `pull`
+while a conflict was pending would parse raw marker text on every single command, not
+just `status`/`push`. `True` is also simply the correct answer here, not just the safe
+one: unresolved markers are exactly the kind of local state `host_dirty` exists to
+protect from being silently overwritten.
+
 `StateEngine.state.label` computes a single display string (`host pending changes` >
 `device pending changes` > `synced`) with `host_dirty` taking priority. `device_dirty`
 transitions are only ever driven by **confirmed** outcomes from `connector.py` (a
@@ -452,16 +465,22 @@ crash instead of the expected, handled outcome it is.
 **The `MergeConflictError` guard.** Conflict markers are not valid IOS syntax, so once
 they're in `EDIT_FILE`, nothing may hand that content to `Differ`/`ciscoconfparse2` —
 parsing it is undefined at best, and staging literal marker text to send to a device is
-the failure mode this whole feature is supposed to prevent. `_refresh_staging()` (the
-shared choke point `status` and `push` both call) checks for marker lines
-(`<<<<<<< `/`>>>>>>> `, with the trailing space since `git merge-file` always passes `-L`
-labels) **before** calling `Differ` at all, and raises `MergeConflictError` if found —
-caught by `status` (prints `Device state: merge conflict pending` and returns) and by
-`push` (prints and exits 1, before ever connecting). Nothing about this is persisted in
-`state.json` — like the rest of change detection here, it's recomputed from `EDIT_FILE`'s
-actual content on every call, not cached. `c2sync discard` doubles as the abort path: it
-already unconditionally overwrites `EDIT_FILE` with the baseline at `HEAD`, which clears
-markers with no special-casing needed — the same effect as `git merge --abort`.
+the failure mode this whole feature is supposed to prevent. The actual marker check is
+`Differ.has_conflict_markers()` (a static method alongside `diff_lines` — marker lines
+are `<<<<<<< `/`>>>>>>> `, with the trailing space since `git merge-file` always passes
+`-L` labels), shared by two call sites rather than living in `main.py` alone:
+`_refresh_staging()` (the choke point `status` and `push` both call) checks it **before**
+calling `Differ` at all and raises `MergeConflictError` if found — caught by `status`
+(prints `Device state: merge conflict pending` and returns) and by `push` (prints and
+exits 1, before ever connecting). `StateEngine._compute_host_dirty()` (see State tracking
+above) checks the same thing for the same reason, because `pull`/`revert`/`save` read
+`host_dirty` directly and never call `_refresh_staging()` — the second call site is not
+redundancy, it is the fix for a real gap a single check in `main.py` alone would have
+left open. Nothing about any of this is persisted in `state.json` — like the rest of
+change detection here, it's recomputed from `EDIT_FILE`'s actual content on every call,
+not cached. `c2sync discard` doubles as the abort path: it already unconditionally
+overwrites `EDIT_FILE` with the baseline at `HEAD`, which clears markers with no
+special-casing needed — the same effect as `git merge --abort`.
 
 **Consequences for the rest of `push`.** The preview and its confirmation now live
 *inside* the `with _connected(...)` block, since neither can be computed before the
