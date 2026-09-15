@@ -32,6 +32,7 @@ Each `c2sync init NAME ...` creates a project (`./NAME/` by default, or `--dir P
 * Staged changes are rebuilt into Cisco IOS CLI commands that respect configuration context (see Local Editing below)
 * Pushes are verified against the device's own response; a rejected command aborts the rest of the push, but leaves successful commands on the device
 * `c2sync fetch` checks the device for drift without changing any local state, closing the one gap the otherwise-offline `status` can't see on its own
+* If the device changed out-of-band since the last push, `push` reconciles it with a real three-way merge (like `git merge` on any text file) — disjoint changes merge and proceed automatically, a real conflict stops with standard conflict markers for you to resolve by hand
 
 ## Installation
 
@@ -320,20 +321,17 @@ interface GigabitEthernet1/0/1
 c2sync status
 ```
 Behavior:
-* Shows whether the local file has unpushed edits (`host pending changes`), the device has pushed-but-unsaved changes (`device pending changes`), or everything is `synced`
+* Shows whether the local file has unpushed edits (`host pending changes`), the device has pushed-but-unsaved changes (`device pending changes`), everything is `synced`, or a `merge conflict pending` from a previous push needs resolving by hand (see Push below)
 * Previews the exact CLI commands that `push` would send
 * Read-only — never connects to the device
 
 ### 6. Push
 
 ```
-c2sync push [-y] [--rebase] [--rollback-on-error]
+c2sync push [-y] [--rollback-on-error]
 
 Options:
     -y                   Push without an interactive confirmation prompt
-    --rebase             Adopt out-of-band device changes as the new baseline
-                         without asking, then replay your staged commands on
-                         top of it
     --rollback-on-error  Offer to undo a partially-applied push
 ```
 Behavior:
@@ -343,11 +341,10 @@ Behavior:
 * If the device rejects a command partway, the commands before it stay on the device. C2Sync always re-reads the running config at that point and moves the baseline to match, so `status` shows only what's still outstanding and your edits are left alone — it does not undo the push
 * `--rollback-on-error` additionally offers to push the device back to the pre-push baseline. It's opt-in because undoing means sending more config to a device that just rejected some, and a negation isn't always a safe inverse (undoing an address or interface change can cut the session doing it). It previews and asks first unless `-y` is also given
 
-**If the device changed outside C2Sync**, the staged commands describe a device that no longer exists. A line you deleted locally still becomes `no <that line>`, which on IOS clears whatever is actually there — so it can destroy a colleague's replacement for it, with nothing in the preview hinting at that. `push` therefore reads the device before showing you anything, and stops if it has drifted, printing what changed on it.
+**If the device changed outside C2Sync**, the staged commands describe a device that no longer exists. A line you deleted locally still becomes `no <that line>`, which on IOS clears whatever is actually there — so it can destroy a colleague's replacement for it, with nothing in the preview hinting at that. `push` therefore reads the device before showing you anything, and stops if it has drifted, printing what changed on it — then reconciles it with a real three-way text merge (the same kind git itself does for any text file): the last confirmed baseline as the common ancestor, your edits and the device's current config as the two sides.
 
-Accepting (`--rebase`, or confirming the prompt) adopts the device's current config as the new baseline and recomputes — your edits in `device.config` are replayed on top of it, not overwritten by it, which is what `--rebase` names. The adoption is recorded as a git commit, and the preview you then approve is the truth. The recomputed commands will include undoing the out-of-band change, since your file doesn't contain it — that's the point: it happens either way, and this is the version where you see it first. To keep both sets of changes, merge them with `git` in the project directory before pushing.
-
-`-y` doesn't stand in for that decision and never prompts for it: with `-y` and no `--rebase`, drift is a hard failure, so a CI job stops rather than pushing against a stale baseline.
+* **The two sides touched different parts of the config** — the merge is clean, and push just proceeds automatically. There's nothing to ask about: both your edits and the device's change survive. This is recorded as a merge commit rather than a plain one.
+* **The two sides changed the same line differently** — a real conflict. Push always stops for this, unconditionally; no flag resolves it, the same way git itself never silently picks a side on a real conflict. Standard conflict markers (`<<<<<<<` / `|||||||` / `=======` / `>>>>>>>`) are written into `device.config` for you to resolve by hand — delete the markers, keep what should actually be sent, and re-run `c2sync push`. Nothing is sent to the device while a conflict is unresolved (`status` reports `merge conflict pending`, and every command but `discard` refuses to run). `c2sync discard` doubles as the abort path — it drops your edits and reverts to the last confirmed baseline, clearing the markers with it.
 
 ### 7. Save
 

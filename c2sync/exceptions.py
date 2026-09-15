@@ -26,3 +26,7 @@ class ConfigReadError(C2SyncError):
     to be committed as the git baseline, so an unrecognizable read has to fail
     loudly rather than be stored as though it described the device.
     """
+
+
+class MergeConflictError(C2SyncError):
+    """Raised when EDIT_FILE still has unresolved git merge conflict markers from a previous push."""

@@ -134,3 +134,55 @@ def test_commit_content_keeps_the_previous_commit_as_parent(repo):
     git_ops.commit_content(repo, 'device.config', 'live from device\n', 'partial push')
 
     assert git_ops.resolve_rev(repo, 'HEAD~1') == before
+
+
+# ------------------------------------------------------------------
+# merge_file
+# ------------------------------------------------------------------
+
+def test_merge_file_combines_non_overlapping_changes_with_no_conflict():
+    base = 'interface Gi1/0/1\n description Server\ninterface Gi1/0/2\n shutdown\n'
+    ours = 'interface Gi1/0/1\n description Server\ninterface Gi1/0/2\n'
+    theirs = 'interface Gi1/0/1\n description NewDesc\ninterface Gi1/0/2\n shutdown\n'
+
+    merged, conflicts = git_ops.merge_file(base, ours, theirs)
+
+    assert conflicts == 0
+    assert 'description NewDesc' in merged
+    assert 'shutdown' not in merged
+
+
+def test_merge_file_flags_a_real_conflict_without_picking_a_side():
+    base = 'interface Gi1/0/1\n description Server\n'
+    ours = 'interface Gi1/0/1\n description Mine\n'
+    theirs = 'interface Gi1/0/1\n description Colleague\n'
+
+    merged, conflicts = git_ops.merge_file(base, ours, theirs)
+
+    assert conflicts > 0
+    assert '<<<<<<<' in merged
+    assert 'Mine' in merged
+    assert 'Colleague' in merged
+
+
+def test_merge_file_returns_zero_conflicts_when_both_sides_made_the_same_change():
+    base = 'interface Gi1/0/1\n description Server\n'
+    ours = 'interface Gi1/0/1\n description Mine\n'
+    theirs = 'interface Gi1/0/1\n description Mine\n'
+
+    merged, conflicts = git_ops.merge_file(base, ours, theirs)
+
+    assert conflicts == 0
+    assert merged == ours
+
+
+def test_merge_file_uses_the_given_labels_in_conflict_markers():
+    base = 'interface Gi1/0/1\n description Server\n'
+    ours = 'interface Gi1/0/1\n description Mine\n'
+    theirs = 'interface Gi1/0/1\n description Colleague\n'
+
+    merged, conflicts = git_ops.merge_file(base, ours, theirs, labels=('your edits', 'last baseline', 'device'))
+
+    assert conflicts > 0
+    assert 'your edits' in merged
+    assert 'device' in merged
