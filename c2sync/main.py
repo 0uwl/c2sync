@@ -15,6 +15,7 @@ from c2sync.exceptions import (
     ConfigReadError,
     ConfigSaveError,
     HostKeyRejectedError,
+    MergeConflictError,
     ProjectExistsError,
 )
 from c2sync.state_engine import StateEngine
@@ -123,8 +124,9 @@ fetch (look only) vs. pull (fetch and merge) split.
 Closes a gap `status` cannot: status is deliberately offline (it only
 compares device.config against your local edits), so it can report the
 device as synced even when it has actually drifted out-of-band. Run
-`c2sync pull --force` to take the device as-is, or `c2sync push --rebase` to
-adopt the drift as the new baseline and push your local edits on top of it.
+`c2sync pull --force` to take the device as-is and drop your edits, or just
+run `c2sync push` - it merges non-overlapping drift with your edits
+automatically (see `c2sync help push`).
 """,
 
     'status': """
@@ -135,10 +137,15 @@ Show whether there are unpushed local edits or unsaved device changes.
 Recomputes the staged commands from device.config against the last confirmed
 push (device.config at git HEAD), then prints the device state and a preview
 of anything staged. Read-only, and never connects to the device.
+
+If a previous push's drift merge left unresolved conflicts, state prints as
+"merge conflict pending" instead - see `c2sync help push`. Resolve the
+markers in device.config by hand (or `c2sync discard` to abandon your edits
+and start over) before anything else will run.
 """,
 
     'push': """
-Usage: c2sync push [-y] [--rebase] [--rollback-on-error]
+Usage: c2sync push [-y] [--rollback-on-error]
 
 Preview the staged commands and push them to the device.
 
@@ -150,9 +157,6 @@ device.config, and commits it, advancing the baseline.
 
 Options:
   -y                    Skip the confirmation prompt.
-  --rebase              Adopt out-of-band device changes as the new
-                        baseline without asking, then replay your staged
-                        commands on top of it.
   --rollback-on-error   If the device rejects a command after earlier ones
                         already applied, offer to undo them by pushing the
                         device back to the pre-push baseline.
@@ -162,18 +166,21 @@ commands describe a device that no longer exists -- a line you deleted
 locally still becomes `no <that line>` and can destroy someone else's
 replacement for it, with nothing in the preview hinting at it. So push
 checks first and stops, showing what changed on the device (run `c2sync
-fetch` any time to see this without pushing). Accepting adopts the device's
-current config as the new baseline (your edits in device.config are left
-alone) and recomputes, so the preview you approve is the truth -- this is
-what --rebase names: your edits are replayed on top of the device's moved-on
-state, not overwritten by it. The recomputed commands will include undoing
-those out-of-band changes, since your file does not contain them -- that is
-the point: it happens either way, and this is the version where you see it
-first.
+fetch` any time to see this without pushing), then merges it with your
+edits using a real three-way text merge (device.config at HEAD as the base,
+your edits and the device's current config as the two sides) -- the same
+kind of merge git itself does for any text file.
 
--y does not stand in for that decision, and never prompts for it: with -y
-and no --rebase, drift is a hard failure, so a CI job stops instead of
-pushing against a stale baseline.
+If the two sides touched different parts of the config, the merge is clean
+and push just proceeds automatically -- there is nothing to ask about, and
+your edits and the device's change both survive. This is recorded as a
+merge commit rather than a plain one. If the two sides changed the *same*
+line differently, that is a real conflict, and push always stops for it,
+unconditionally -- no flag resolves it, the same way git never silently
+picks a side on one. Conflict markers (<<<<<<< / ||||||| / ======= / >>>>>>>)
+are written into device.config for you to resolve by hand; every command but
+`c2sync discard` (which abandons your edits and starts over, the abort path)
+refuses to run until they're gone.
 
 A command the device rejects aborts the batch, and the commands before it
 stay on the device. C2Sync always re-reads the running config at that point
@@ -182,7 +189,7 @@ outstanding and your edits are left alone -- it does not undo the push.
 
 --rollback-on-error is opt-in because undoing means sending more config to
 a device that just rejected some, and a negation is not always a safe
-inverse. It previews and asks first unless -y is also given. `c2sync revert` 
+inverse. It previews and asks first unless -y is also given. `c2sync revert`
 is the same recovery driven by hand, and stays available either way.
 """,
 
@@ -474,15 +481,20 @@ def fetch(arguments: list):
     for line in drift:
         print(f'  {line}')
     print('\nNothing was changed locally or on the device. Run `c2sync pull --force` to take '
-          'the device as-is (overwriting local edits), or `c2sync push --rebase` to adopt this '
-          'as the new baseline and push your local edits on top of it.')
+          'the device as-is (overwriting local edits), or `c2sync push` to merge this with your '
+          'local edits and push the result.')
 
 
 def status(arguments: list):
     LOGGER.debug(f'Given arguments: {arguments}')
 
     project = _require_project()
-    lines = _refresh_staging(project)
+
+    try:
+        lines = _refresh_staging(project)
+    except MergeConflictError as e:
+        print(f'Device state: merge conflict pending\n\n{e}')
+        return
 
     state = StateEngine(project).state
     print(f'Device state: {state.label}')
@@ -507,20 +519,15 @@ def status(arguments: list):
 def push(arguments: list):
     LOGGER.debug(f'Given arguments: {arguments}')
     assume_yes = '-y' in arguments
-    # Deliberately not the same flag as -y: -y means "don't ask me to
-    # confirm my own commands", never "silently overwrite changes someone
-    # else made to the device". Named --rebase, not --force: what it does
-    # is adopt the device's moved-on state as the new baseline and replay
-    # the staged commands on top of it - a rebase, not a blind overwrite -
-    # so that's the name that tells a git-literate operator what actually
-    # happens. No short form, unlike pull/revert's --force/-f: this flag is
-    # reached for rarely enough (only on genuine out-of-band drift) that a
-    # short alias isn't worth the risk of it being typed reflexively.
-    rebase = '--rebase' in arguments
     rollback_on_error = '--rollback-on-error' in arguments
 
     project = _require_project()
-    lines = _refresh_staging(project)
+
+    try:
+        lines = _refresh_staging(project)
+    except MergeConflictError as e:
+        print(f'\n{e}')
+        sys.exit(1)
 
     if not lines:
         print('Nothing staged to push.')
@@ -533,7 +540,7 @@ def push(arguments: list):
         # baseline. Check that against the device before showing a preview
         # anyone is asked to approve - otherwise the preview describes a
         # device that may not exist any more. See the helper for why.
-        lines = _reconcile_out_of_band_drift(project, interface, lines, assume_yes, rebase)
+        lines = _reconcile_out_of_band_drift(project, interface, lines)
 
         if not lines:
             print('\nYour edits are already on the device - nothing left to push.')
@@ -748,9 +755,7 @@ def _detect_drift(project: Project, interface) -> tuple[str, list[str]]:
     return live, Differ.diff_lines(baseline, live)
 
 
-def _reconcile_out_of_band_drift(
-    project: Project, interface, lines: list[str], assume_yes: bool, rebase: bool,
-) -> list[str]:
+def _reconcile_out_of_band_drift(project: Project, interface, lines: list[str]) -> list[str]:
     """
     Verify the device still matches the baseline the staged commands were
     computed against, and return the commands to actually push.
@@ -767,16 +772,19 @@ def _reconcile_out_of_band_drift(
     hinting at it. This is `git push` without a fetch, and the fix is the
     one git uses - check first, and refuse to push over a moved target.
 
-    On drift, adopting the live config as the new baseline (via
-    `git_ops.commit_content`, which leaves EDIT_FILE alone) and recomputing
-    keeps the user's edits *and* makes the resulting preview honest. Note
-    the recomputed commands will include undoing the out-of-band changes,
-    since EDIT_FILE does not contain them - that is the point: it happens
-    either way, and this is the version where the user sees it first.
-
-    This is genuinely a rebase, not a force-overwrite - EDIT_FILE (the
-    user's work) is untouched, only the baseline it's replayed against
-    moves - which is why the flag that authorizes it is named --rebase.
+    Reconciles with a real three-way text merge (`git_ops.merge_file()`) -
+    base is the baseline, "ours" is EDIT_FILE, "theirs" is the live device.
+    A clean merge (the two sides touched different parts of the config)
+    always auto-proceeds: there's no decision left for a human to make, and
+    nothing left for a flag to gate - the merge already preserves both
+    sides. The adoption is recorded as a merge commit rather than a plain
+    one, so it reads as what it is in `git log`. A real conflict (the same
+    line changed both ways) always stops, unconditionally - no flag resolves
+    it, the same way git itself never silently picks a side on one. Markers
+    are written into EDIT_FILE and `_refresh_staging()`'s conflict guard
+    (see MergeConflictError) then blocks every command but `discard` (which
+    doubles as the abort path, same as `git checkout -- <file>`) until a
+    human resolves them by hand.
     """
     live, drift = _detect_drift(project, interface)
     if not drift:
@@ -788,25 +796,30 @@ def _reconcile_out_of_band_drift(
     for line in drift:
         print(f'  {line}')
 
-    if rebase:
-        print("\n--rebase: adopting the device's current config as the new baseline.")
-    elif assume_yes:
-        # -y must never stand in for this decision, and prompting here
-        # would hang a CI job on stdin - so fail, loudly and non-zero.
-        print('\nRefusing to push against a stale baseline. Re-run with --rebase to adopt\n'
-              "the device's current config as the baseline and recompute the commands,\n"
-              'or `c2sync pull --force` to take the device as-is and drop your edits.')
-        sys.exit(1)
-    elif not _confirm("\nAdopt the device's current config as the new baseline and recompute?"):
-        print('Aborted. Nothing was sent to the device.')
+    baseline = git_ops.show_at_head(project.PROJECT_DIR, project.edit_file_relpath) or ''
+    with open(project.EDIT_FILE) as file:
+        ours = file.read()
+
+    merged, conflicts = git_ops.merge_file(baseline, ours, live)
+
+    with open(project.EDIT_FILE, 'w') as file:
+        file.write(merged)
+
+    if conflicts:
+        print(f'\n{conflicts} conflict(s) between your edits and the device change - the same '
+              f'config was changed both ways, so this needs a human decision. Resolve them in\n'
+              f'{project.edit_file_relpath} by hand (remove the <<<<<<< / ||||||| / ======= / '
+              f'>>>>>>> markers, keeping what should actually be sent), then re-run `c2sync push`.\n'
+              f'Nothing was sent to the device - run `c2sync discard` instead to abandon your '
+              f'edits and start over from the device\'s current config.')
         sys.exit(1)
 
     git_ops.commit_content(
         project.PROJECT_DIR, project.edit_file_relpath, live,
-        f'c2sync push: adopted out-of-band changes on {project.target} as the new baseline',
+        f'c2sync push: merge commit - out-of-band changes on {project.target} merged with local edits',
     )
 
-    print('\nRecomputed against the device\'s current config.')
+    print('\nMerged cleanly - your edits and the device change did not overlap.')
     return _refresh_staging(project)
 
 
@@ -946,12 +959,34 @@ def _refresh_staging(project: Project) -> list[str]:
     Recompute staging on demand from the baseline vs. the current edit
     file, and return the staged lines.
 
-    Nothing is recorded about host_dirty here any more: it is derived from
-    the same two inputs this diff already reads (EDIT_FILE vs. device.config
-    at git HEAD), so any StateEngine built afterwards computes it directly.
-    That is what stops a command which never calls this - `pull`, `save`,
-    `revert` - from reading a stale flag and overwriting local edits.
+    Nothing is recorded about host_dirty here: it is derived fresh on every
+    StateEngine construction (see state_engine.py), so any command that
+    builds one afterwards - or never calls this at all, like `pull`, `save`,
+    `revert` - always sees the current answer rather than a flag this
+    function forgot to refresh.
+
+    Refuses first if EDIT_FILE still has unresolved merge conflict markers
+    from a previous push's drift reconciliation (see
+    _reconcile_out_of_band_drift) - those aren't valid IOS syntax, so
+    handing them to Differ/ciscoconfparse2 would mean parsing garbage at
+    best and staging literal marker text to send to the device at worst.
+    Checked fresh from the file every call, the same on-demand philosophy as
+    the rest of change detection here - nothing about "conflict pending" is
+    persisted in state.json, it's just whatever EDIT_FILE currently says.
+    StateEngine's own host_dirty derivation has the same guard for the same
+    reason, since `pull`/`revert`/`save` read it without ever calling this.
     """
+    with open(project.EDIT_FILE) as file:
+        edit_content = file.read()
+
+    if Differ.has_conflict_markers(edit_content):
+        raise MergeConflictError(
+            f'{project.edit_file_relpath} has unresolved merge conflict markers from a previous '
+            f'push. Resolve them by hand (remove the <<<<<<< / ||||||| / ======= / >>>>>>> lines, '
+            f'keeping what should actually be sent), then re-run. Or run `c2sync discard` to '
+            f'abandon your edits and start over from the last confirmed baseline instead.'
+        )
+
     Differ(project).refresh_staging_from_files()
 
     with open(project.STAGING_FILE) as file:

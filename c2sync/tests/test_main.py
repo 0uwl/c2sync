@@ -362,6 +362,25 @@ def test_pull_refuses_when_host_dirty_without_force(project):
         mock_handler.assert_not_called()
 
 
+def test_pull_refuses_safely_with_unresolved_conflict_markers_pending(project):
+    """
+    pull reads StateEngine(project).state.host_dirty directly - it never
+    calls _refresh_staging(), so it needs host_dirty's own conflict-marker
+    guard (see state_engine.py) rather than main.py's. Without it, this
+    would hand raw marker text to ciscoconfparse2 instead of refusing
+    cleanly, the same hazard _refresh_staging() guards against for
+    status/push.
+    """
+    _write(project.EDIT_FILE, [
+        '<<<<<<< your edits', 'description Mine', '=======', 'description Colleague', '>>>>>>> device',
+    ])
+
+    with patch('c2sync.connector.ConnectHandler') as mock_handler:
+        with pytest.raises(SystemExit):
+            main_module.pull([])
+        mock_handler.assert_not_called()
+
+
 def test_pull_dash_y_does_not_overwrite_host_dirty_edits(project):
     """
     pull has no other prompt -y would otherwise skip, so unlike
@@ -503,9 +522,38 @@ def test_status_is_idempotent_across_repeated_calls(project):
     assert content.count('shutdown') == 1
 
 
+def test_status_reports_merge_conflict_pending(project, capsys):
+    """
+    Detected fresh from EDIT_FILE's content, not persisted state - the
+    same on-demand philosophy as the rest of change detection here.
+    """
+    _write(project.EDIT_FILE, [
+        '<<<<<<< your edits', 'description Mine', '=======', 'description Colleague', '>>>>>>> device',
+    ])
+
+    main_module.status([])
+
+    output = capsys.readouterr().out
+    assert 'merge conflict pending' in output
+
+
 # ------------------------------------------------------------------
 # push
 # ------------------------------------------------------------------
+
+def test_push_refuses_with_unresolved_conflict_markers_without_connecting(project):
+    """
+    Conflict markers are not valid IOS syntax, so push must refuse before
+    ever handing them to Differ/ciscoconfparse2 or opening a connection.
+    """
+    _write(project.EDIT_FILE, [
+        '<<<<<<< your edits', 'description Mine', '=======', 'description Colleague', '>>>>>>> device',
+    ])
+
+    with patch('c2sync.connector.ConnectHandler') as mock_handler:
+        with pytest.raises(SystemExit):
+            main_module.push(['-y'])
+        mock_handler.assert_not_called()
 
 def test_push_pushes_staged_changes_and_updates_baseline(project):
     _write(project.EDIT_FILE, ['interface Gi1/0/1', ' shutdown'])
@@ -691,11 +739,48 @@ def test_push_rollback_on_error_asks_before_pushing_the_correction(project):
     assert mock_conn.send_config_set.call_count == 1
 
 
-def test_push_detects_out_of_band_change_and_refuses_under_dash_y(project):
+def test_push_merges_non_overlapping_drift_automatically(project):
     """
-    The staged commands are computed offline against the baseline, so a
-    device someone else changed makes the preview describe a device that no
-    longer exists. -y must not stand in for approving that.
+    Ours (a local edit to Gi1/0/2) and theirs (an out-of-band change to
+    Gi1/0/1) touch different parts of the config, so the merge is clean and
+    push proceeds with no flag and no extra prompt - there's nothing left
+    for a human to decide.
+    """
+    _sync_known_good(project, [
+        'interface Gi1/0/1', ' description Server', 'interface Gi1/0/2', ' shutdown',
+    ])
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Server', 'interface Gi1/0/2'])
+
+    live = 'interface Gi1/0/1\n description NewDesc\ninterface Gi1/0/2\n shutdown\n'
+    merged = 'interface Gi1/0/1\n description NewDesc\ninterface Gi1/0/2\n'
+    mock_conn = _device_mock(merged, config_before_push=live)
+
+    patches = _mocked_connect(mock_conn)
+    with patches[0], patches[1], patches[2]:
+        main_module.push(['-y'])
+
+    # Only ours' actual delta is sent - the out-of-band description change
+    # is already there, so nothing tries to redo or undo it.
+    pushed = mock_conn.send_config_set.call_args.args[0]
+    assert any('no shutdown' in line for line in pushed)
+    assert not any('description' in line for line in pushed)
+
+    # Recorded as a merge commit, not a plain push commit.
+    log = git_ops._run(project.PROJECT_DIR, 'log', '--oneline')
+    assert 'merge commit' in log
+
+    with open(project.EDIT_FILE) as file:
+        final = file.read()
+    assert 'NewDesc' in final
+    assert 'shutdown' not in final
+
+
+def test_push_stops_on_a_genuine_conflict_and_writes_markers(project):
+    """
+    Both sides changed the exact same line differently - a real conflict,
+    which must never be resolved by silently picking a side (the old
+    --force/--rebase "always adopt" behavior used to overwrite a
+    colleague's own change here without any hint in the preview).
     """
     _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
     _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Mine'])
@@ -714,54 +799,17 @@ def test_push_detects_out_of_band_change_and_refuses_under_dash_y(project):
 
     assert excinfo.value.code == 1
     mock_conn.send_config_set.assert_not_called()
-    # Nothing was adopted or committed behind the user's back.
+
+    # Nothing was adopted or committed - the conflict is unresolved, so HEAD
+    # must not move.
     assert git_ops.show_at_head(project.PROJECT_DIR, 'device.config') == baseline_before
 
-
-def test_push_declining_the_drift_prompt_sends_nothing(project):
-    _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
-    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Mine'])
-
-    mock_conn = MagicMock()
-    mock_conn.check_enable_mode.return_value = True
-    mock_conn.send_command.return_value = _running_config('interface Gi1/0/1\n description Colleague\n')
-
-    with patch('c2sync.connector.ConnectHandler', return_value=mock_conn), \
-         patch('builtins.input', side_effect=['admin', 'n']), \
-         patch('getpass.getpass', side_effect=['pw', '']):
-        with pytest.raises(SystemExit):
-            main_module.push([])
-
-    mock_conn.send_config_set.assert_not_called()
-
-
-def test_push_adopting_drift_recomputes_against_the_live_config(project):
-    """
-    Adopting moves the baseline to the device without touching EDIT_FILE,
-    so the user's edits survive and the recomputed preview is honest about
-    also undoing the out-of-band change.
-    """
-    _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
-    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Mine'])
-
-    live = 'interface Gi1/0/1\n description Colleague\n'
-    mock_conn = _device_mock('interface Gi1/0/1\n description Mine\n', config_before_push=live)
-
-    patches = _mocked_connect(mock_conn)
-    with patches[0], patches[1], patches[2]:
-        main_module.push(['-y', '--rebase'])
-
-    pushed = mock_conn.send_config_set.call_args.args[0]
-    # Recomputed against the live device, not the stale baseline.
-    assert any('description Mine' in line for line in pushed)
-
-    # The user's edits were never clobbered by the adoption.
+    # Conflict markers are left in EDIT_FILE for a human to resolve by hand.
     with open(project.EDIT_FILE) as file:
-        assert 'description Mine' in file.read()
-
-    # The adoption is visible in history rather than silent.
-    log = git_ops._run(project.PROJECT_DIR, 'log', '--oneline')
-    assert 'adopted out-of-band changes' in log
+        content = file.read()
+    assert '<<<<<<<' in content
+    assert 'Mine' in content
+    assert 'Colleague' in content
 
 
 def test_push_does_not_prompt_when_device_matches_baseline(project):
@@ -790,11 +838,18 @@ def test_push_does_not_prompt_when_device_matches_baseline(project):
 
 def test_push_drift_that_already_matches_edits_sends_nothing(project):
     """
-    Someone else made the same change first: adopting leaves nothing to
-    push, and that is a success, not an error.
+    Someone else made the same change first: the merge sees identical
+    content on both sides of the base, so it's clean by construction and
+    leaves nothing to push - that's a success, not an error.
     """
     _sync_known_good(project, ['interface Gi1/0/1', ' description Server'])
-    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Mine'])
+    # Baseline ends with 'end' (a real device read always does - see
+    # _running_config), so the local edit has to keep it too: dropping it
+    # here would make EDIT_FILE disagree with the device on a line neither
+    # side actually meant to touch, which git_ops.merge_file() (being plain
+    # text, not IOS-aware) can genuinely see as a real conflicting hunk
+    # adjacent to the one line that did change.
+    _write(project.EDIT_FILE, ['interface Gi1/0/1', ' description Mine', 'end'])
 
     mock_conn = MagicMock()
     mock_conn.check_enable_mode.return_value = True
@@ -802,7 +857,7 @@ def test_push_drift_that_already_matches_edits_sends_nothing(project):
 
     patches = _mocked_connect(mock_conn)
     with patches[0], patches[1], patches[2]:
-        main_module.push(['-y', '--rebase'])
+        main_module.push(['-y'])
 
     mock_conn.send_config_set.assert_not_called()
     assert StateEngine(project).state.host_dirty is False
@@ -862,6 +917,28 @@ def test_discard_reverts_edit_file_to_baseline(project):
         assert file.read() == ''
 
     assert StateEngine(project).state.host_dirty is False
+
+
+def test_discard_doubles_as_the_merge_conflict_abort_path(project):
+    """
+    discard reverts EDIT_FILE to baseline unconditionally, which is exactly
+    `git merge --abort`'s effect here - it doesn't need to know anything
+    about conflict markers to clear them.
+    """
+    with open(project.EDIT_FILE) as file:
+        baseline = file.read()
+
+    _write(project.EDIT_FILE, [
+        '<<<<<<< your edits', 'description Mine', '=======', 'description Colleague', '>>>>>>> device',
+    ])
+
+    main_module.discard([])
+
+    with open(project.EDIT_FILE) as file:
+        assert file.read() == baseline
+
+    # Normal commands work again immediately - no lingering conflict state.
+    main_module.status([])
 
 
 # ------------------------------------------------------------------

@@ -114,6 +114,54 @@ def show_at(project_dir: str, rev: str, path: str) -> str:
     return _run(project_dir, 'show', f'{rev}:{path}')
 
 
+def merge_file(
+    base_content: str, ours_content: str, theirs_content: str,
+    labels: tuple[str, str, str] = ('your edits', 'last baseline', 'device'),
+) -> tuple[str, int]:
+    """
+    Three-way text merge via `git merge-file` - the same plumbing git uses to
+    merge any text file, run here on three in-memory strings rather than
+    files in a working tree. Used to reconcile local edits with an
+    out-of-band device change (see push's drift handling in main.py).
+
+    Returns (merged_content, conflict_count). 0 means a clean merge -
+    merged_content is ready to use as-is. A positive count means
+    merged_content contains that many git-style
+    <<<<<<< / ||||||| / ======= / >>>>>>> blocks that need a human to resolve
+    them - never something to guess at automatically, the same way git
+    itself never picks a side on a real conflict.
+
+    Deliberately does not go through _run(): git merge-file's exit code *is*
+    the conflict count on a normal run, not a pass/fail signal, so _run()'s
+    "nonzero exit -> raise GitError" would wrongly treat every conflict as a
+    hard failure instead of the expected outcome it is.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        paths = {name: os.path.join(tmpdir, name) for name in ('ours', 'base', 'theirs')}
+        for name, content in (('ours', ours_content), ('base', base_content), ('theirs', theirs_content)):
+            with open(paths[name], 'w') as file:
+                file.write(content)
+
+        # -p: print the merge result instead of writing it back to the
+        # 'ours' file, so this stays side-effect-free - those paths are
+        # throwaway temp files, not anything in the actual project.
+        # --diff3 includes the base content in a conflict block (the
+        # '|||||||' section) alongside the two divergent sides, so a human
+        # resolving it can see what actually changed on each side instead of
+        # just the raw collision.
+        result = subprocess.run(
+            ['git', 'merge-file', '-p', '--diff3',
+             '-L', labels[0], '-L', labels[1], '-L', labels[2],
+             paths['ours'], paths['base'], paths['theirs']],
+            capture_output=True, text=True,
+        )
+
+    if result.returncode < 0:
+        raise GitError(result.stderr.strip())
+
+    return result.stdout, result.returncode
+
+
 def show_at_head(project_dir: str, path: str) -> str | None:
     """
     Same as show_at(project_dir, 'HEAD', path), but returns None instead of

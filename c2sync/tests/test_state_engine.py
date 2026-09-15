@@ -140,3 +140,24 @@ def test_refresh_host_dirty_recomputes_after_the_file_changes(clean_edit_file):
     engine.refresh_host_dirty()
 
     assert engine.state.host_dirty is True
+
+
+def test_host_dirty_never_hands_conflict_markers_to_the_differ(clean_edit_file):
+    """
+    Unresolved merge conflict markers (see MergeConflictError in main.py)
+    are not valid IOS syntax. main.py's own _refresh_staging() refuses to
+    parse them, but host_dirty is derived on *every* StateEngine
+    construction - including from pull/revert/save, none of which call
+    _refresh_staging() at all. Without this guard, running `pull` while a
+    conflict was pending would hand raw marker text straight to
+    Differ.diff_lines()/ciscoconfparse2 instead of being safely refused.
+
+    True is also just the correct answer here, not merely a safe one:
+    unresolved markers are exactly the kind of local state host_dirty
+    exists to protect from being silently overwritten.
+    """
+    _write_edit_file(
+        '<<<<<<< your edits\ndescription Mine\n=======\ndescription Colleague\n>>>>>>> device\n'
+    )
+
+    assert StateEngine(PROJECT).state.host_dirty is True

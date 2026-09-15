@@ -7,6 +7,13 @@ from c2sync import Project, git_ops
 
 LOGGER = logging.getLogger(__name__)
 
+# git merge-file always passes -L labels (see git_ops.merge_file), so a real
+# marker line is never bare - checking for the label-bearing form avoids
+# mistaking an operator's own '<<<<<<<' banner text (unlikely in IOS config,
+# but not impossible) for an actual unresolved conflict.
+_CONFLICT_MARKER_START = '<<<<<<< '
+_CONFLICT_MARKER_END = '>>>>>>> '
+
 
 class Differ:
     """
@@ -35,6 +42,24 @@ class Differ:
         vs. the device's live running-config) both build on this.
         """
         return Diff(from_config, to_config, syntax='ios').get_diff()
+
+
+    @staticmethod
+    def has_conflict_markers(content: str) -> bool:
+        """
+        True if content still has unresolved git merge conflict markers left
+        by push's drift reconciliation (see MergeConflictError in main.py).
+
+        Conflict-marker text is not valid IOS syntax, so nothing may hand it
+        to diff_lines()/ciscoconfparse2 - every caller that reads EDIT_FILE
+        (staging refresh, and StateEngine's host_dirty derivation) must check
+        this *first* and treat a hit as "don't parse this," not merely warn
+        after the fact.
+        """
+        return any(
+            line.startswith(_CONFLICT_MARKER_START) or line.startswith(_CONFLICT_MARKER_END)
+            for line in content.splitlines()
+        )
 
 
     def refresh_staging(self, baseline_config: str, current_config: str) -> bool:

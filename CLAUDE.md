@@ -31,11 +31,18 @@ already built, even in places where it was never written down as a rule until no
   stops holding.
 - **Push safety.** The out-of-band drift check (see below) is framed and built as
   `git push` without a fetch: read the remote's current state first, and refuse to push
-  over a target that's moved, rather than trusting a stale local diff. The flag that
-  authorizes adopting that drift is named `push --rebase`, not `--force` — what it
-  actually does (replay the staged commands on top of the device's moved-on state,
-  leaving `device.config` itself untouched) is a rebase, not a blind overwrite, and the
-  name should tell a git-literate operator exactly that.
+  over a target that's moved, rather than trusting a stale local diff.
+- **Real merges, not force-adoption.** Drift reconciliation uses an actual three-way text
+  merge (`git_ops.merge_file()`, a thin wrapper around `git merge-file`) between the
+  baseline, the user's edits, and the device's current state — the same algorithm git
+  itself uses to merge any text file. A clean merge (disjoint changes) auto-proceeds with
+  no flag needed, since there's nothing left to decide; a real conflict (the same line
+  changed both ways) always stops and writes standard conflict markers into
+  `device.config`, the same way git never silently picks a side on one. An earlier design
+  (a `push --force`/`--rebase` flag that just adopted the device's state wholesale) is
+  what this replaced — it could silently discard someone else's out-of-band change
+  whenever the user's own edits didn't happen to mention it, exactly the kind of blind
+  overwrite this whole drift check exists to prevent.
 - **Fetch vs. pull.** `c2sync fetch` is the read-only device-drift check — connect, read,
   report, touch nothing local — mirroring git's own `fetch` (look only) against `pull`
   (fetch *and* merge, which is what `c2sync pull` already did before `fetch` existed).
@@ -94,7 +101,7 @@ c2sync init NAME --ssh HOST [PORT] [--dir PATH] [--pull]          # SSH transpor
 c2sync pull [--force|-f]
 c2sync fetch
 c2sync status
-c2sync push [-y] [--rebase] [--rollback-on-error]
+c2sync push [-y] [--rollback-on-error]
 c2sync save [-y]
 c2sync discard
 c2sync revert [COMMIT] [-y] [--force|-f]   # COMMIT defaults to HEAD
@@ -228,10 +235,10 @@ having to assert it.
 | `c2sync/__init__.py` | `Project` dataclass, `init_project`/`get_project` |
 | `c2sync/connector.py` | `DeviceInterface` — Netmiko `ConnectHandler` wrapper (serial or SSH) |
 | `c2sync/differ.py` | `Differ` — real config-tree diff (`ciscoconfparse2`) → CLI commands |
-| `c2sync/git_ops.py` | Thin `git` subprocess wrapper — `init`/`commit`/`commit_content`/`commit_empty`/`show_at`/`show_at_head`/`resolve_rev` |
+| `c2sync/git_ops.py` | Thin `git` subprocess wrapper — `init`/`commit`/`commit_content`/`commit_empty`/`show_at`/`show_at_head`/`resolve_rev`/`merge_file` |
 | `c2sync/user_config.py` | Reads the optional global TOML preferences file — `load()`/`config_path()` |
 | `c2sync/state_engine.py` | `StateEngine` — derived `host_dirty` / persisted `device_dirty` |
-| `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigReadError`, `ConfigSaveError`, `HostKeyRejectedError`, `ProjectExistsError` |
+| `c2sync/exceptions.py` | `C2SyncError`, `ConfigApplyError`, `ConfigReadError`, `ConfigSaveError`, `HostKeyRejectedError`, `ProjectExistsError`, `MergeConflictError` |
 | `c2sync/main.py` | CLI entry point: `init` / `pull` / `fetch` / `status` / `push` / `save` / `discard` / `revert` |
 
 ### Diff → CLI command translation (`differ.py`)
@@ -296,6 +303,19 @@ The derivation uses `Differ.diff_lines`, **not** string equality, for the same r
 drift detection does: the question is whether there are commands to send. A cosmetic
 edit that stages nothing is not unpushed work, and treating it as such would make `pull`
 refuse to run while `status` simultaneously reported nothing staged.
+
+**`_compute_host_dirty()` checks for unresolved merge conflict markers before calling
+`Differ.diff_lines` at all** (via `Differ.has_conflict_markers()`, a static method
+alongside `diff_lines`) — returning `True` immediately rather than ever handing marker
+text to `ciscoconfparse2`. This matters specifically *because* `host_dirty` is now
+derived on every construction: `_refresh_staging()` (see the `MergeConflictError` guard
+under Out-of-band drift check below) already refuses to parse a conflicted `EDIT_FILE`,
+but `pull`/`revert`/`save` read `StateEngine(project).state.host_dirty` directly and
+never call `_refresh_staging()` at all — so without this second guard, running `pull`
+while a conflict was pending would parse raw marker text on every single command, not
+just `status`/`push`. `True` is also simply the correct answer here, not just the safe
+one: unresolved markers are exactly the kind of local state `host_dirty` exists to
+protect from being silently overwritten.
 
 `StateEngine.state.label` computes a single display string (`host pending changes` >
 `device pending changes` > `synced`) with `host_dirty` taking priority. `device_dirty`
@@ -408,31 +428,59 @@ It reads the live running-config and diffs it against the baseline **with
 running-config` isn't mistaken for a change. No drift → returns the staged lines
 untouched and the command behaves exactly as before.
 
-On drift it prints what changed on the device, then:
+**On drift, it reconciles with a real three-way text merge** — `git_ops.merge_file()`,
+a thin wrapper around `git merge-file`, the same plumbing git uses to merge any text
+file. Base is the baseline (`device.config` at `HEAD`), "ours" is `EDIT_FILE`, "theirs"
+is the live device. This replaced an earlier design (`push --force`/`--rebase`) that
+simply adopted the device's current config as the new baseline unconditionally and
+recomputed the diff against it — which, for anything the user's own edits didn't
+mention, silently discarded the out-of-band change rather than actually keeping both.
+That earlier version is exactly the git-push-force mistake this whole drift check exists
+to prevent, just one level deeper — a real merge is the fix, the same way "check before
+pushing" was the fix for pushing blind in the first place:
 
-- `--rebase` — adopt without asking. Named `--rebase`, not `--force`/`-f` like
-  `pull`/`revert` use for their own overwrite-approval flag: what this actually does is
-  replay the staged commands on top of the device's moved-on state (`EDIT_FILE` itself is
-  never touched), which is a rebase, not a force-overwrite — see Git as the mental model
-  above. No short form, unlike `pull -f`/`revert -f`: this is reached for rarely enough
-  (only on genuine out-of-band drift) that a terse alias isn't worth the risk of it being
-  typed reflexively.
-- `-y` alone — **hard failure, exit 1**, never a prompt. `-y` means "don't ask me to
-  confirm my own commands", not "silently overwrite someone else's work", and prompting
-  here would hang a CI job on stdin. Same independent-flag split as `pull`/`revert`,
-  where `-y` and `--force` are also deliberately separate flags — `push` just names its
-  own version of that second flag differently, for the reason above.
-- otherwise — prompt; declining exits 1 with nothing sent.
+- **Clean merge (the two sides touched different parts of the config) — always
+  auto-proceeds, no flag, no prompt.** There is nothing left for a human to decide: both
+  sides' changes survive by construction. Recorded as a distinct **merge commit**
+  (`c2sync push: merge commit - ...`) via `git_ops.commit_content()`, which is why that
+  function exists in the shape it does — it advances `HEAD` to the live device's content
+  **without touching `EDIT_FILE`**, while `EDIT_FILE` itself gets overwritten with the
+  merge result (base + both deltas). Diffing the new baseline (the device's content)
+  against that merged `EDIT_FILE` on the immediately-following `_refresh_staging()` call
+  then yields exactly the user's own delta — the out-of-band change is *not* rediscovered
+  as something to undo, unlike the old adopt-and-recompute design.
+- **Real conflict (the same line changed both ways) — always stops, unconditionally.** No
+  flag resolves it, the same way git itself never silently picks a side on a real merge
+  conflict. `git merge-file -p --diff3` writes standard
+  `<<<<<<< / ||||||| / ======= / >>>>>>>` markers into the content, which gets written to
+  `EDIT_FILE` (not committed — `HEAD` does not move on a conflict, since nothing has been
+  resolved yet) and the run exits 1 with instructions. See the `MergeConflictError` guard
+  below for what happens next.
 
-Adopting calls `git_ops.commit_content()` (which is why that function exists in the
-shape it does — it advances `HEAD` to the live config **without touching `EDIT_FILE`**),
-then re-runs `_refresh_staging()`. The user's edits survive, the drift is recorded as a
-commit visible in `git log`, and the recomputed preview is the truth. Note the
-recomputed commands *will* include undoing the out-of-band change, since `EDIT_FILE`
-doesn't contain it — that is the intended outcome, not a flaw: it happens either way,
-and this is the version where the operator sees it before approving. Keeping both sets
-of changes is a real three-way merge, deliberately not built — `PROJECT_DIR` is a normal
-git repo and git can do it.
+`merge_file()` deliberately does not go through `git_ops._run()`: `git merge-file`'s exit
+code *is* the conflict count on a normal run, not a pass/fail signal, and `_run()`
+treating any nonzero exit as a hard `GitError` would wrongly turn every conflict into a
+crash instead of the expected, handled outcome it is.
+
+**The `MergeConflictError` guard.** Conflict markers are not valid IOS syntax, so once
+they're in `EDIT_FILE`, nothing may hand that content to `Differ`/`ciscoconfparse2` —
+parsing it is undefined at best, and staging literal marker text to send to a device is
+the failure mode this whole feature is supposed to prevent. The actual marker check is
+`Differ.has_conflict_markers()` (a static method alongside `diff_lines` — marker lines
+are `<<<<<<< `/`>>>>>>> `, with the trailing space since `git merge-file` always passes
+`-L` labels), shared by two call sites rather than living in `main.py` alone:
+`_refresh_staging()` (the choke point `status` and `push` both call) checks it **before**
+calling `Differ` at all and raises `MergeConflictError` if found — caught by `status`
+(prints `Device state: merge conflict pending` and returns) and by `push` (prints and
+exits 1, before ever connecting). `StateEngine._compute_host_dirty()` (see State tracking
+above) checks the same thing for the same reason, because `pull`/`revert`/`save` read
+`host_dirty` directly and never call `_refresh_staging()` — the second call site is not
+redundancy, it is the fix for a real gap a single check in `main.py` alone would have
+left open. Nothing about any of this is persisted in `state.json` — like the rest of
+change detection here, it's recomputed from `EDIT_FILE`'s actual content on every call,
+not cached. `c2sync discard` doubles as the abort path: it already unconditionally
+overwrites `EDIT_FILE` with the baseline at `HEAD`, which clears markers with no
+special-casing needed — the same effect as `git merge --abort`.
 
 **Consequences for the rest of `push`.** The preview and its confirmation now live
 *inside* the `with _connected(...)` block, since neither can be computed before the
@@ -639,14 +687,17 @@ treats an unreadable stdin as a decline, since every one of its callers is about
 write to a live device and "nobody was there to answer" must never resolve to yes.
 Passwords/enable-secrets are **never** read from the global config file or stored
 anywhere by c2sync itself — env vars are meant to be injected by the CI system's own
-secrets manager. Note `push -y` fails closed on out-of-band drift rather than
-prompting, which is what keeps a CI job from pushing against a stale baseline;
-`--rebase` is the opt-out. Combined with `push -y`/`save -y` (skips the confirmation prompt
-too), this is what unblocks the PR-merge-triggers-apply workflow: a CI job that runs
-`c2sync push -y` against the device once a config change is reviewed and merged, which
-is the actual payoff of tracking device config in git rather than just having a
-prettier editing loop. Note this is about a *user's* config repo (a `PROJECT_DIR`
-created by `c2sync init`), not this repo's own CI/CD.
+secrets manager. Note that `push -y` behaves safely on out-of-band drift without any
+extra flag needed: a clean merge auto-proceeds (nothing for `-y` to gate, since there was
+never a decision to make), and a real conflict always stops and exits nonzero regardless
+of `-y` — a CI job naturally halts there rather than pushing conflict markers to a
+device, with no separate "fails closed" flag to remember. Combined with `push -y`/
+`save -y` (skips the confirmation prompt too), this is what unblocks the
+PR-merge-triggers-apply workflow: a CI job that runs `c2sync push -y` against the device
+once a config change is reviewed and merged, which is the actual payoff of tracking
+device config in git rather than just having a prettier editing loop. Note this is about
+a *user's* config repo (a `PROJECT_DIR` created by `c2sync init`), not this repo's own
+CI/CD.
 
 A `docker login`-style persistent credential store (i.e. one that also holds the
 password) was considered and explicitly declined: `docker login`'s own default storage
@@ -868,6 +919,20 @@ the user-facing write-up of what each would involve.
   nothing catches a command that is syntactically valid but operationally destructive,
   such as shutting the interface the session rides on. `c2sync revert` is today's
   recovery path, which is mitigation after the fact rather than prevention.
+- **VS Code extension.** A thin optional wrapper over the CLI (status bar state, one-click
+  `pull`/`fetch`/`push`/`discard`, `device.config` syntax highlighting) — never a second
+  way to drive a project, always calling the same `c2sync` a terminal user would. Phase 1
+  needs no extension at all: `push`'s merge conflict markers (see Out-of-band drift check
+  above) are already standard git format, which VS Code's built-in editor already
+  recognizes in any file with inline accept/reject actions. A deeper integration with
+  VS Code's richer, visual Merge Editor is a wanted stretch goal, deliberately deferred —
+  it has no stable, documented way for an extension to open it on an arbitrary file (a
+  `git mergetool`-style CLI flag request was closed by the VS Code team as not planned;
+  the only working path is a private, unsupported command), so doing it properly would
+  mean first giving `push` a real git-level conflict (actual unmerged index stages) for
+  VS Code's own git integration to detect — a bigger architectural step than today's
+  side-effect-free `git_ops.merge_file()`, and one worth its own design pass rather than
+  deciding here. See `README.md` for the user-facing version.
 
 ## Docs drift to be aware of
 

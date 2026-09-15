@@ -89,6 +89,17 @@ class StateEngine:
         except OSError:
             return False
 
+        # Unresolved conflict markers from a previous push's drift merge
+        # (see MergeConflictError in main.py) are not valid IOS syntax, so
+        # they must never reach diff_lines()/ciscoconfparse2 - and unlike
+        # _refresh_staging(), this runs on every StateEngine construction,
+        # including from pull/revert/save, which never call that guard
+        # themselves. Reporting dirty here is also simply correct: markers
+        # in EDIT_FILE are exactly the kind of unresolved local state that
+        # host_dirty exists to protect against overwriting.
+        if Differ.has_conflict_markers(current):
+            return True
+
         baseline = git_ops.show_at_head(
             self.project.PROJECT_DIR, self.project.edit_file_relpath) or ''
 
